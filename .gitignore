@@ -1,0 +1,21 @@
+# Local secrets and runtime state
+.env
+**/.env
+/uploads/
+/logs/
+/.local/
+
+# Downloaded models and generated binaries
+/models/
+/imagenet_classes.txt
+/bin/
+/common/mcp/bin/
+
+# Frontend dependencies and build output
+/vue-frontend/node_modules/
+/vue-frontend/dist/
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,55 @@
+name: cognigo
+
+services:
+  mysql:
+    image: mysql:8.0.39
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${COGNIGO_MYSQL_PASSWORD:-change-me}
+      MYSQL_DATABASE: ${COGNIGO_MYSQL_DATABASE:-CogniGo}
+      TZ: Asia/Shanghai
+    ports:
+      - "${COGNIGO_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis/redis-stack-server:7.4.0-v8
+    restart: unless-stopped
+    ports:
+      - "${COGNIGO_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${COGNIGO_RABBITMQ_USER:-root}
+      RABBITMQ_DEFAULT_PASS: ${COGNIGO_RABBITMQ_PASSWORD:-change-me}
+      RABBITMQ_DEFAULT_VHOST: ${COGNIGO_RABBITMQ_VHOST:-/}
+    ports:
+      - "${COGNIGO_RABBITMQ_PORT:-5672}:5672"
+      - "${COGNIGO_RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:
