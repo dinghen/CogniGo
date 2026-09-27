@@ -66,8 +66,8 @@ func CheckCaptchaForEmail(email, userInput string) (bool, error) {
 }
 
 // InitRedisIndex 初始化 Redis 索引，支持按文件名区分
-func InitRedisIndex(ctx context.Context, filename string, dimension int) error {
-	indexName := GenerateIndexName(filename)
+func InitRedisIndex(ctx context.Context, username, filename string, dimension int) error {
+	indexName := GenerateUserIndexName(username, filename)
 
 	// 检查索引是否存在
 	_, err := Rdb.Do(ctx, "FT.INFO", indexName).Result()
@@ -83,7 +83,7 @@ func InitRedisIndex(ctx context.Context, filename string, dimension int) error {
 
 	fmt.Println("正在创建 Redis 索引...")
 
-	prefix := GenerateIndexNamePrefix(filename)
+	prefix := GenerateUserIndexNamePrefix(username, filename)
 
 	// 创建索引
 	createArgs := []interface{}{
@@ -93,6 +93,11 @@ func InitRedisIndex(ctx context.Context, filename string, dimension int) error {
 		"SCHEMA",
 		"content", "TEXT",
 		"metadata", "TEXT",
+		"source", "TEXT",
+		"title", "TEXT",
+		"user", "TAG",
+		"original_id", "TEXT",
+		"chunk_index", "NUMERIC",
 		"vector", "VECTOR", "FLAT",
 		"6",
 		"TYPE", "FLOAT32",
@@ -109,8 +114,8 @@ func InitRedisIndex(ctx context.Context, filename string, dimension int) error {
 }
 
 // DeleteRedisIndex 删除 Redis 索引，支持按文件名区分
-func DeleteRedisIndex(ctx context.Context, filename string) error {
-	indexName := GenerateIndexName(filename)
+func DeleteRedisIndex(ctx context.Context, username, filename string) error {
+	indexName := GenerateUserIndexName(username, filename)
 
 	// 删除索引
 	if err := Rdb.Do(ctx, "FT.DROPINDEX", indexName).Err(); err != nil {

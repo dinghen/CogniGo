@@ -40,6 +40,11 @@ charset =  "utf8mb4"
   docDir = "./docs"
   baseUrl="https://dashscope.aliyuncs.com/compatible-mode/v1"
   dimension=1024
+  chunkSize=1000
+  chunkOverlap=150
+  topK=5
+  distanceThreshold=0.45
+  useDistanceThreshold=true
 
  [voiceServiceConfig]
   voiceServiceApiKey = ""
@@ -49,5 +54,6 @@ charset =  "utf8mb4"
   uploadDir = "./uploads"
   onnxLibraryPath = "./.local/onnxruntime/lib/libonnxruntime.so.1.22.0"
   modelPath = "./models/mobilenetv2/mobilenetv2-7.onnx"
-  labelsPath = "./imagenet_classes.txt"
-  mcpURL = "http://127.0.0.1:8081/mcp"
+ labelsPath = "./imagenet_classes.txt"
+ mcpURL = "http://127.0.0.1:8081/mcp"
+ mcpMaxSteps = 12
