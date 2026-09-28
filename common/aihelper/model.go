@@ -47,7 +47,7 @@ func NewOpenAIModel(ctx context.Context) (*OpenAIModel, error) {
 		APIKey:  key,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create openai model failed: %v", err)
+		return nil, fmt.Errorf("create openai model failed: %w", err)
 	}
 	return &OpenAIModel{llm: llm}, nil
 }
@@ -55,7 +55,7 @@ func NewOpenAIModel(ctx context.Context) (*OpenAIModel, error) {
 func (o *OpenAIModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
 	resp, err := o.llm.Generate(ctx, messages)
 	if err != nil {
-		return nil, fmt.Errorf("openai generate failed: %v", err)
+		return nil, fmt.Errorf("openai generate failed: %w", err)
 	}
 	return resp, nil
 }
@@ -63,7 +63,7 @@ func (o *OpenAIModel) GenerateResponse(ctx context.Context, messages []*schema.M
 func (o *OpenAIModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
 	stream, err := o.llm.Stream(ctx, messages)
 	if err != nil {
-		return "", fmt.Errorf("openai stream failed: %v", err)
+		return "", fmt.Errorf("openai stream failed: %w", err)
 	}
 	defer stream.Close()
 
@@ -75,7 +75,7 @@ func (o *OpenAIModel) StreamResponse(ctx context.Context, messages []*schema.Mes
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("openai stream recv failed: %v", err)
+			return "", fmt.Errorf("openai stream recv failed: %w", err)
 		}
 		if len(msg.Content) > 0 {
 			fullResp.WriteString(msg.Content) // 聚合
@@ -102,7 +102,7 @@ func NewOllamaModel(ctx context.Context, baseURL, modelName string) (*OllamaMode
 		Model:   modelName,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create ollama model failed: %v", err)
+		return nil, fmt.Errorf("create ollama model failed: %w", err)
 	}
 	return &OllamaModel{llm: llm}, nil
 }
@@ -110,7 +110,7 @@ func NewOllamaModel(ctx context.Context, baseURL, modelName string) (*OllamaMode
 func (o *OllamaModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
 	resp, err := o.llm.Generate(ctx, messages)
 	if err != nil {
-		return nil, fmt.Errorf("ollama generate failed: %v", err)
+		return nil, fmt.Errorf("ollama generate failed: %w", err)
 	}
 	return resp, nil
 }
@@ -118,7 +118,7 @@ func (o *OllamaModel) GenerateResponse(ctx context.Context, messages []*schema.M
 func (o *OllamaModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
 	stream, err := o.llm.Stream(ctx, messages)
 	if err != nil {
-		return "", fmt.Errorf("ollama stream failed: %v", err)
+		return "", fmt.Errorf("ollama stream failed: %w", err)
 	}
 	defer stream.Close()
 	var fullResp strings.Builder
@@ -128,7 +128,7 @@ func (o *OllamaModel) StreamResponse(ctx context.Context, messages []*schema.Mes
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("openai stream recv failed: %v", err)
+			return "", fmt.Errorf("ollama stream recv failed: %w", err)
 		}
 		if len(msg.Content) > 0 {
 			fullResp.WriteString(msg.Content) // 聚合
@@ -158,7 +158,7 @@ func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) 
 		APIKey:  key,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create ali rag model failed: %v", err)
+		return nil, fmt.Errorf("create ali rag model failed: %w", err)
 	}
 	return &AliRAGModel{
 		llm:      llm,
@@ -178,7 +178,7 @@ func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.M
 		log.Printf("Failed to create RAG query (user may not have uploaded file): %v", err)
 		resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, nil))
 		if err != nil {
-			return nil, fmt.Errorf("ali rag generate failed: %v", err)
+			return nil, fmt.Errorf("ali rag generate failed: %w", err)
 		}
 		return resp, nil
 	}
@@ -189,7 +189,7 @@ func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.M
 		log.Printf("Failed to retrieve documents: %v", err)
 		resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, nil))
 		if err != nil {
-			return nil, fmt.Errorf("ali rag generate failed: %v", err)
+			return nil, fmt.Errorf("ali rag generate failed: %w", err)
 		}
 		return resp, nil
 	}
@@ -197,7 +197,7 @@ func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.M
 	// 3. 构建包含检索结果的提示词并调用 LLM。
 	resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, docs))
 	if err != nil {
-		return nil, fmt.Errorf("ali rag generate failed: %v", err)
+		return nil, fmt.Errorf("ali rag generate failed: %w", err)
 	}
 	return resp, nil
 }
@@ -235,7 +235,7 @@ func withRAGPrompt(messages []*schema.Message, query string, docs []*schema.Docu
 func (o *AliRAGModel) streamWithRAGPrompt(ctx context.Context, messages []*schema.Message, query string, docs []*schema.Document, cb StreamCallback) (string, error) {
 	stream, err := o.llm.Stream(ctx, withRAGPrompt(messages, query, docs))
 	if err != nil {
-		return "", fmt.Errorf("ali rag stream failed: %v", err)
+		return "", fmt.Errorf("ali rag stream failed: %w", err)
 	}
 	defer stream.Close()
 
@@ -247,7 +247,7 @@ func (o *AliRAGModel) streamWithRAGPrompt(ctx context.Context, messages []*schem
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("ali rag stream recv failed: %v", err)
+			return "", fmt.Errorf("ali rag stream recv failed: %w", err)
 		}
 		if len(msg.Content) > 0 {
 			fullResp.WriteString(msg.Content)
@@ -286,7 +286,7 @@ func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
 		APIKey:  key,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create mcp model failed: %v", err)
+		return nil, fmt.Errorf("create mcp model failed: %w", err)
 	}
 
 	mcpBaseURL := config.GetConfig().RuntimeConfig.MCPURL

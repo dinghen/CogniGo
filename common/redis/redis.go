@@ -2,18 +2,28 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/dinghen/CogniGo/config"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dinghen/CogniGo/config"
 	redisCli "github.com/redis/go-redis/v9"
 )
 
 var Rdb *redisCli.Client
 
 var ctx = context.Background()
+
+var ErrNotInitialized = errors.New("redis client is not initialized")
+
+func client() (*redisCli.Client, error) {
+	if Rdb == nil {
+		return nil, ErrNotInitialized
+	}
+	return Rdb, nil
+}
 
 func Init() {
 	conf := config.GetConfig()
@@ -33,15 +43,23 @@ func Init() {
 }
 
 func SetCaptchaForEmail(email, captcha string) error {
+	rdb, err := client()
+	if err != nil {
+		return err
+	}
 	key := GenerateCaptcha(email)
 	expire := 2 * time.Minute
-	return Rdb.Set(ctx, key, captcha, expire).Err()
+	return rdb.Set(ctx, key, captcha, expire).Err()
 }
 
 func CheckCaptchaForEmail(email, userInput string) (bool, error) {
+	rdb, err := client()
+	if err != nil {
+		return false, err
+	}
 	key := GenerateCaptcha(email)
 
-	storedCaptcha, err := Rdb.Get(ctx, key).Result()
+	storedCaptcha, err := rdb.Get(ctx, key).Result()
 	if err != nil {
 		if err == redisCli.Nil {
 
@@ -54,10 +72,8 @@ func CheckCaptchaForEmail(email, userInput string) (bool, error) {
 	if strings.EqualFold(storedCaptcha, userInput) {
 
 		// 验证成功后删除 key
-		if err := Rdb.Del(ctx, key).Err(); err != nil {
-
-		} else {
-
+		if err := rdb.Del(ctx, key).Err(); err != nil {
+			return false, err
 		}
 		return true, nil
 	}
@@ -67,17 +83,27 @@ func CheckCaptchaForEmail(email, userInput string) (bool, error) {
 
 // InitRedisIndex 初始化 Redis 索引，支持按文件名区分
 func InitRedisIndex(ctx context.Context, username, filename string, dimension int) error {
+	rdb, err := client()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(filename) == "" {
+		return fmt.Errorf("username and filename are required")
+	}
+	if dimension <= 0 {
+		return fmt.Errorf("embedding dimension must be positive")
+	}
 	indexName := GenerateUserIndexName(username, filename)
 
 	// 检查索引是否存在
-	_, err := Rdb.Do(ctx, "FT.INFO", indexName).Result()
+	_, err = rdb.Do(ctx, "FT.INFO", indexName).Result()
 	if err == nil {
 		fmt.Println("索引已存在，跳过创建")
 		return nil
 	}
 
 	// 如果索引不存在，创建新索引
-	if !strings.Contains(err.Error(), "Unknown index name") {
+	if !isUnknownIndexError(err) {
 		return fmt.Errorf("检查索引失败: %w", err)
 	}
 
@@ -105,7 +131,7 @@ func InitRedisIndex(ctx context.Context, username, filename string, dimension in
 		"DISTANCE_METRIC", "COSINE",
 	}
 
-	if err := Rdb.Do(ctx, createArgs...).Err(); err != nil {
+	if err := rdb.Do(ctx, createArgs...).Err(); err != nil {
 		return fmt.Errorf("创建索引失败: %w", err)
 	}
 
@@ -115,13 +141,28 @@ func InitRedisIndex(ctx context.Context, username, filename string, dimension in
 
 // DeleteRedisIndex 删除 Redis 索引，支持按文件名区分
 func DeleteRedisIndex(ctx context.Context, username, filename string) error {
+	rdb, err := client()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(filename) == "" {
+		return fmt.Errorf("username and filename are required")
+	}
 	indexName := GenerateUserIndexName(username, filename)
 
-	// 删除索引
-	if err := Rdb.Do(ctx, "FT.DROPINDEX", indexName).Err(); err != nil {
+	// DD also removes the hashes that contain the indexed chunks. Without it,
+	// replacing a file leaves orphaned vectors in Redis indefinitely.
+	if err := rdb.Do(ctx, "FT.DROPINDEX", indexName, "DD").Err(); err != nil {
+		if isUnknownIndexError(err) {
+			return nil
+		}
 		return fmt.Errorf("删除索引失败: %w", err)
 	}
 
 	fmt.Println("索引删除成功！")
 	return nil
+}
+
+func isUnknownIndexError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unknown index")
 }

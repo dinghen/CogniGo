@@ -2,14 +2,16 @@ package file
 
 import (
 	"context"
-	"github.com/dinghen/CogniGo/common/rag"
-	"github.com/dinghen/CogniGo/config"
-	"github.com/dinghen/CogniGo/utils"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
 	"os"
 	"path/filepath"
+
+	"github.com/dinghen/CogniGo/common/rag"
+	"github.com/dinghen/CogniGo/config"
+	"github.com/dinghen/CogniGo/utils"
 )
 
 // 上传rag相关文件（这里只允许文本文件）
@@ -28,74 +30,104 @@ func UploadRagFile(username string, file *multipart.FileHeader) (string, error) 
 		return "", err
 	}
 
-	// 删除用户目录中的所有现有文件及其索引（每个用户只能有一个文件）
-	files, err := os.ReadDir(userDir)
-	if err == nil {
-		for _, f := range files {
-			if !f.IsDir() {
-				filename := f.Name()
-				// 删除该文件对应的 Redis 索引
-				if err := rag.DeleteIndex(context.Background(), username, filename); err != nil {
-					log.Printf("Failed to delete index for %s: %v", filename, err)
-					// 继续执行，不因为索引删除失败而中断文件上传
-				}
-			}
-		}
-	}
-	// 删除用户目录中的所有文件
-	if err := utils.RemoveAllFilesInDir(userDir); err != nil {
-		log.Printf("Failed to clean user directory %s: %v", userDir, err)
+	// Keep the current file until the replacement has been indexed successfully.
+	// This prevents a failed embedding request from destroying the user's
+	// previously working knowledge base.
+	entries, err := os.ReadDir(userDir)
+	if err != nil {
+		log.Printf("Failed to inspect user directory %s: %v", userDir, err)
 		return "", err
 	}
 
-	// 生成UUID作为唯一文件名
+	// Generate UUID as the stored filename. The original client filename is
+	// used only for its validated extension, so it cannot escape userDir.
 	uuid := utils.GenerateUUID()
-
 	ext := filepath.Ext(file.Filename)
 	filename := uuid + ext
+
+	stagingDir := filepath.Join(userDir, ".staging")
+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
+		log.Printf("Failed to create staging directory %s: %v", stagingDir, err)
+		return "", err
+	}
 	filePath := filepath.Join(userDir, filename)
+	stagingPath := filepath.Join(stagingDir, filename)
 
-	// 打开上传的文件
-	src, err := file.Open()
-	if err != nil {
-		log.Printf("Failed to open uploaded file: %v", err)
+	if err := copyUpload(stagingPath, file); err != nil {
+		log.Printf("Failed to copy uploaded file: %v", err)
 		return "", err
 	}
-	defer src.Close()
+	removeStaging := true
+	defer func() {
+		if removeStaging {
+			_ = os.Remove(stagingPath)
+		}
+	}()
 
-	// 创建目标文件
-	dst, err := os.Create(filePath)
-	if err != nil {
-		log.Printf("Failed to create destination file %s: %v", filePath, err)
-		return "", err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		log.Printf("Failed to copy file content: %v", err)
-		return "", err
-	}
-
-	log.Printf("File uploaded successfully: %s", filePath)
-
-	// 创建 RAG 索引器并对文件进行向量化
 	indexer, err := rag.NewRAGIndexer(username, filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
 	if err != nil {
 		log.Printf("Failed to create RAG indexer: %v", err)
-		// 删除已上传的文件
-		os.Remove(filePath)
 		return "", err
 	}
 
-	// 读取文件内容并创建向量索引
-	if err := indexer.IndexFile(context.Background(), filePath); err != nil {
+	if err := indexer.IndexFile(context.Background(), stagingPath); err != nil {
 		log.Printf("Failed to index file: %v", err)
-		// 删除已上传的文件和索引
-		os.Remove(filePath)
-		rag.DeleteIndex(context.Background(), username, filename)
+		_ = rag.DeleteIndex(context.Background(), username, filename)
 		return "", err
 	}
 
-	log.Printf("File indexed successfully: %s", filename)
+	if err := os.Rename(stagingPath, filePath); err != nil {
+		log.Printf("Failed to finalize uploaded file %s: %v", filePath, err)
+		_ = rag.DeleteIndex(context.Background(), username, filename)
+		return "", err
+	}
+	removeStaging = false
+
+	// The new file is now valid. Remove the previous direct files and their
+	// indexes; cleanup failures are logged so a successful upload is not
+	// reported as failed because an old index was already absent.
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		oldFilename := entry.Name()
+		if err := rag.DeleteIndex(context.Background(), username, oldFilename); err != nil {
+			log.Printf("Failed to delete index for %s: %v", oldFilename, err)
+		}
+		if err := os.Remove(filepath.Join(userDir, oldFilename)); err != nil && !os.IsNotExist(err) {
+			log.Printf("Failed to remove old file %s: %v", oldFilename, err)
+		}
+	}
+
+	log.Printf("File uploaded and indexed successfully: %s", filePath)
 	return filePath, nil
+}
+
+func copyUpload(destination string, file *multipart.FileHeader) error {
+	src, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("open upload: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create staging file: %w", err)
+	}
+	removeOnError := true
+	defer func() {
+		_ = dst.Close()
+		if removeOnError {
+			_ = os.Remove(destination)
+		}
+	}()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("copy upload: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("close staging file: %w", err)
+	}
+	removeOnError = false
+	return nil
 }

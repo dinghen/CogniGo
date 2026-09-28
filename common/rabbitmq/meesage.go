@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/dinghen/CogniGo/dao/message"
 	"github.com/dinghen/CogniGo/model"
 
@@ -30,7 +31,7 @@ func MQMessage(msg *amqp.Delivery) error {
 	var param MessageMQParam
 	err := json.Unmarshal(msg.Body, &param)
 	if err != nil {
-		return err
+		return &PermanentDeliveryError{Err: fmt.Errorf("decode message: %w", err)}
 	}
 	newMsg := &model.Message{
 		SessionID: param.SessionID,
@@ -39,6 +40,6 @@ func MQMessage(msg *amqp.Delivery) error {
 		IsUser:    param.IsUser,
 	}
 	//消费者异步插入到数据库中
-	message.CreateMessage(newMsg)
-	return nil
+	_, err = message.CreateMessage(newMsg)
+	return err
 }

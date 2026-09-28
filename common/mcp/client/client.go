@@ -32,7 +32,12 @@ func NewMCPClient(ctx context.Context, httpURL string) (*MCPClient, error) {
 	return &MCPClient{session: session}, nil
 }
 
-func (m *MCPClient) Session() *sdk.ClientSession { return m.session }
+func (m *MCPClient) Session() *sdk.ClientSession {
+	if m == nil {
+		return nil
+	}
+	return m.session
+}
 
 func (m *MCPClient) InitializeResult() *sdk.InitializeResult {
 	if m == nil || m.session == nil {
@@ -90,7 +95,11 @@ func (m *MCPClient) EinoTools(ctx context.Context) ([]tool.BaseTool, error) {
 	for _, item := range tools {
 		adapted, err := NewEinoTool(m, item)
 		if err != nil {
-			return nil, fmt.Errorf("adapt MCP tool %q: %w", item.Name, err)
+			name := "<unknown>"
+			if item != nil {
+				name = item.Name
+			}
+			return nil, fmt.Errorf("adapt MCP tool %q: %w", name, err)
 		}
 		out = append(out, adapted)
 	}
@@ -104,6 +113,9 @@ type EinoTool struct {
 }
 
 func NewEinoTool(client *MCPClient, item *sdk.Tool) (*EinoTool, error) {
+	if client == nil || client.session == nil {
+		return nil, fmt.Errorf("MCP client is not initialized")
+	}
 	if item == nil || item.Name == "" {
 		return nil, fmt.Errorf("MCP tool has no name")
 	}
@@ -114,9 +126,17 @@ func NewEinoTool(client *MCPClient, item *sdk.Tool) (*EinoTool, error) {
 	return &EinoTool{client: client, info: &schema.ToolInfo{Name: item.Name, Desc: item.Description, ParamsOneOf: params}}, nil
 }
 
-func (t *EinoTool) Info(context.Context) (*schema.ToolInfo, error) { return t.info, nil }
+func (t *EinoTool) Info(context.Context) (*schema.ToolInfo, error) {
+	if t == nil || t.info == nil {
+		return nil, fmt.Errorf("MCP tool is not initialized")
+	}
+	return t.info, nil
+}
 
 func (t *EinoTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	if t == nil || t.client == nil || t.client.session == nil {
+		return "", fmt.Errorf("MCP tool is not initialized")
+	}
 	args := map[string]any{}
 	if argumentsInJSON != "" {
 		if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
@@ -126,6 +146,9 @@ func (t *EinoTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 	result, err := t.client.CallTool(ctx, t.info.Name, args)
 	if err != nil {
 		return "", err
+	}
+	if result == nil {
+		return "", fmt.Errorf("MCP tool %q returned an empty result", t.info.Name)
 	}
 	encoded, err := json.Marshal(struct {
 		Content           []sdk.Content `json:"content,omitempty"`

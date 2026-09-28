@@ -95,3 +95,17 @@ func TestSchemaFromMCPPreservesRequiredDescription(t *testing.T) {
 		t.Fatalf("properties were not preserved: %#v", jsonSchema)
 	}
 }
+
+func TestMCPToolRejectsUninitializedClient(t *testing.T) {
+	if _, err := NewEinoTool(nil, &sdk.Tool{Name: "echo"}); err == nil {
+		t.Fatal("NewEinoTool should reject a nil client")
+	}
+	var tool *EinoTool
+	if _, err := tool.Info(context.Background()); err == nil {
+		t.Fatal("nil EinoTool should reject Info calls")
+	}
+	var client *MCPClient
+	if client.Session() != nil {
+		t.Fatal("nil client should not expose a session")
+	}
+}
