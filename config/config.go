@@ -18,6 +18,8 @@ type MainConfig struct {
 type EmailConfig struct {
 	Authcode string `toml:"authcode"`
 	Email    string `toml:"email" `
+	SMTPHost string `toml:"smtpHost"`
+	SMTPPort int    `toml:"smtpPort"`
 }
 
 type RedisConfig struct {
@@ -52,11 +54,15 @@ type Rabbitmq struct {
 }
 
 type RagModelConfig struct {
-	RagEmbeddingModel string `toml:"embeddingModel"`
-	RagChatModelName  string `toml:"chatModelName"`
-	RagDocDir         string `toml:"docDir"`
-	RagBaseUrl        string `toml:"baseUrl"`
-	RagDimension      int    `toml:"dimension"`
+	RagEmbeddingModel       string  `toml:"embeddingModel"`
+	RagChatModelName        string  `toml:"chatModelName"`
+	RagDocDir               string  `toml:"docDir"`
+	RagBaseUrl              string  `toml:"baseUrl"`
+	RagChunkSize            int     `toml:"chunkSize"`
+	RagChunkOverlap         int     `toml:"chunkOverlap"`
+	RagTopK                 int     `toml:"topK"`
+	RagDistanceThreshold    float64 `toml:"distanceThreshold"`
+	RagUseDistanceThreshold bool    `toml:"useDistanceThreshold"`
 }
 
 type VoiceServiceConfig struct {
@@ -70,6 +76,7 @@ type RuntimeConfig struct {
 	ModelPath       string `toml:"modelPath"`
 	LabelsPath      string `toml:"labelsPath"`
 	MCPURL          string `toml:"mcpURL"`
+	MCPMaxSteps     int    `toml:"mcpMaxSteps"`
 }
 
 type Config struct {
@@ -136,6 +143,16 @@ func applyEnvironment(c *Config) error {
 	}
 	setString(&c.EmailConfig.Email, "COGNIGO_EMAIL")
 	setString(&c.EmailConfig.Authcode, "COGNIGO_EMAIL_AUTHCODE")
+	setString(&c.EmailConfig.SMTPHost, "COGNIGO_SMTP_HOST")
+	if err := setInt(&c.EmailConfig.SMTPPort, "COGNIGO_SMTP_PORT"); err != nil {
+		return err
+	}
+	if c.EmailConfig.SMTPHost == "" {
+		c.EmailConfig.SMTPHost = "localhost"
+	}
+	if c.EmailConfig.SMTPPort <= 0 {
+		c.EmailConfig.SMTPPort = 1025
+	}
 
 	setString(&c.RedisConfig.RedisHost, "COGNIGO_REDIS_HOST")
 	if err := setInt(&c.RedisConfig.RedisPort, "COGNIGO_REDIS_PORT"); err != nil {
@@ -174,8 +191,28 @@ func applyEnvironment(c *Config) error {
 	setString(&c.RagModelConfig.RagChatModelName, "COGNIGO_RAG_CHAT_MODEL")
 	setString(&c.RagModelConfig.RagDocDir, "COGNIGO_RAG_DOC_DIR")
 	setString(&c.RagModelConfig.RagBaseUrl, "COGNIGO_RAG_BASE_URL")
-	if err := setInt(&c.RagModelConfig.RagDimension, "COGNIGO_RAG_DIMENSION"); err != nil {
+	if err := setInt(&c.RagModelConfig.RagChunkSize, "COGNIGO_RAG_CHUNK_SIZE"); err != nil {
 		return err
+	}
+	if err := setInt(&c.RagModelConfig.RagChunkOverlap, "COGNIGO_RAG_CHUNK_OVERLAP"); err != nil {
+		return err
+	}
+	if err := setInt(&c.RagModelConfig.RagTopK, "COGNIGO_RAG_TOP_K"); err != nil {
+		return err
+	}
+	if value, ok := os.LookupEnv("COGNIGO_RAG_DISTANCE_THRESHOLD"); ok {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return fmt.Errorf("COGNIGO_RAG_DISTANCE_THRESHOLD must be a number: %w", err)
+		}
+		c.RagModelConfig.RagDistanceThreshold = parsed
+	}
+	if value, ok := os.LookupEnv("COGNIGO_RAG_USE_DISTANCE_THRESHOLD"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("COGNIGO_RAG_USE_DISTANCE_THRESHOLD must be a boolean: %w", err)
+		}
+		c.RagModelConfig.RagUseDistanceThreshold = parsed
 	}
 
 	setString(&c.VoiceServiceConfig.VoiceServiceApiKey, "COGNIGO_BAIDU_API_KEY")
@@ -185,6 +222,9 @@ func applyEnvironment(c *Config) error {
 	setString(&c.RuntimeConfig.ModelPath, "COGNIGO_ONNX_MODEL_PATH")
 	setString(&c.RuntimeConfig.LabelsPath, "COGNIGO_LABELS_PATH")
 	setString(&c.RuntimeConfig.MCPURL, "COGNIGO_MCP_URL")
+	if err := setInt(&c.RuntimeConfig.MCPMaxSteps, "COGNIGO_MCP_MAX_STEPS"); err != nil {
+		return err
+	}
 	return nil
 }
 

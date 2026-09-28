@@ -88,6 +88,9 @@ func RemoveAllFilesInDir(dir string) error {
 
 // ValidateFile 校验文件是否为允许的文本文件（.md 或 .txt）
 func ValidateFile(file *multipart.FileHeader) error {
+	if file == nil {
+		return fmt.Errorf("文件不能为空")
+	}
 	// 校验文件扩展名
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if ext != ".md" && ext != ".txt" {

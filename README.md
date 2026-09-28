@@ -1,75 +1,71 @@
-# CogniGo v2 本地运行
+# CogniGo
 
-本目录是仓库当前的第二版实现。后端会自动执行 MySQL 表迁移；Redis 必须使用 Redis Stack（包含 RediSearch），RabbitMQ 用于异步保存聊天消息。
+我开发并维护 CogniGo，用它练习 Go 服务端分层、AI 应用集成和本地可复现的工程流程。项目提供账号注册与登录、会话和 AI 对话、知识文件上传与检索，以及一个独立运行的 MCP 工具服务。
 
-推荐使用 Go 1.24.10 或更高版本、Node.js 22 LTS、npm 和 Docker Desktop（WSL 2 集成）。当前代码也已在 Go 1.26 上通过构建；Node.js 24 可以构建前端，但旧版 Vue CLI 依赖会显示兼容性警告。
+## 我实现的内容
 
-## 1. 初始化
+- 使用 Go 和 Gin 提供 REST API；AI 对话支持普通响应与 SSE 流式响应，用户接口由 Controller、Service、DAO 分层组织。
+- 使用 CloudWeGo Eino 接入聊天模型、Embedding 和 RAG 检索。当前知识库按 Markdown 标题、段落等结构切片，默认上限为 1000 个 Unicode 字符、重叠 150 个字符；这两个值是字符数，不是 Token 数。
+- 使用 Redis Stack 的向量索引存储和检索知识片段；保留上传文件作为原始数据，检索结果携带来源信息，并在无相关资料时明确提示模型不要编造。
+- 使用官方 Go MCP SDK 实现独立 MCP 服务和客户端；客户端初始化并发现工具，将 MCP 工具映射到 Eino 原生工具调用，再把结构化结果交回模型。
+- 使用 MySQL/GORM 保存用户、会话和消息；RabbitMQ 用于异步消息持久化；Redis 还用于验证码和短期状态；接口通过 JWT 保护。
+- 使用 Docker Compose 启动 MySQL、Redis Stack、RabbitMQ 和本地邮件收件箱。图像识别依赖未纳入仓库的 ONNX Runtime 与模型文件。
+
+Embedding 服务需要兼容当前 Eino Ark 适配器使用的 OpenAI-compatible Embeddings API。切换模型时不仅要改模型标识，还要配置兼容的 endpoint 和凭据；向量维度由运行时的 Embedding 响应探测，Redis 索引按实际维度建立。模型或 endpoint 改变后，原始上传文件需要重新向量化，Redis Stack 服务本身不需要更换。
+
+当前 RAG 是面向单用户单文件知识库的 MVP，没有实现混合检索、重排模型、多文件管理或语义模型切片。我还没有建立带人工标注问题的检索评测集或独立性能基准，因此不把 Recall、MRR、P95 延迟和吞吐量写成项目成果。
+
+## 本地运行
+
+依赖 Go 1.25+、Node.js 22 LTS、npm 和 Docker Compose。复制环境变量模板，并至少填写聊天/Embedding 服务的 API Key：
 
 ```bash
 cp .env.example .env
-# 编辑 .env，至少填写 OPENAI_API_KEY；按需填写邮箱和百度 TTS 密钥。
+# 编辑 .env，填写 OPENAI_API_KEY；模型服务按需配置。
 make setup
 make frontend-install
+make infra-up
 ```
 
-`.env` 中的邮箱授权码、百度 API 密钥和 JWT 密钥属于敏感信息，不要提交到 Git。阿里百炼兼容 OpenAI API，文档中使用的变量名是 `OPENAI_API_KEY`、`OPENAI_MODEL_NAME` 和 `OPENAI_BASE_URL`。
+本地注册默认通过 Mailpit 接收邮件，不需要真实邮箱或 SMTP 授权码。启动后打开 `http://127.0.0.1:8025` 查看验证码和系统发出的登录账号。注册成功后页面会使用服务端返回的 JWT 直接进入应用；之后也可以用 Mailpit 中收到的账号和注册密码登录。Mailpit 端口只绑定到本机回环地址。
 
-图像识别模型和 ONNX Runtime 原生库不随 Git 仓库提交，首次需要时执行：
+分别在终端启动 API、MCP 服务和前端：
+
+```bash
+make run
+make run-mcp
+make frontend-dev
+```
+
+默认访问地址：
+
+| 服务 | 地址 |
+| --- | --- |
+| Web 前端 | `http://127.0.0.1:8080` |
+| Go API | `http://127.0.0.1:9090` |
+| MCP HTTP 服务 | `http://127.0.0.1:8081/mcp` |
+| Mailpit 收件箱 | `http://127.0.0.1:8025` |
+| MySQL / Redis Stack | `127.0.0.1:3306` / `127.0.0.1:6379` |
+| RabbitMQ / 管理界面 | `127.0.0.1:5672` / `http://127.0.0.1:15672` |
+
+如果本机端口被占用，可在 `.env` 中覆盖对应的 `COGNIGO_*_PORT`；前端端口可通过 Vue CLI 的 `--port` 参数覆盖。`make infra-up` 只启动基础设施，不会自动启动 API 或前端。
+
+运行 RAG 和模型对话需要有效的 `OPENAI_API_KEY`。默认配置指向阿里云百炼的 OpenAI 兼容接口；切换供应方时同时设置 `COGNIGO_RAG_BASE_URL` 和 `COGNIGO_EMBEDDING_MODEL`，并确认新服务提供兼容的 Embeddings 接口。索引会按运行时取得的维度创建；更换模型后首次检索会从本地保留的上传文件重建向量。不要手动填写 Redis 向量维度。
+
+图像识别模型和 ONNX Runtime 原生库不随 Git 仓库发布，需要时执行：
 
 ```bash
 make models
 ```
 
-脚本会根据 Linux/macOS 和 CPU 架构下载 ONNX Runtime 1.22.0、MobileNetV2 以及 ImageNet 标签。默认 Linux x86_64 运行库路径是 `.local/onnxruntime/lib/libonnxruntime.so.1.22.0`，可通过 `.env` 中的 `COGNIGO_ONNX_LIBRARY_PATH` 覆盖。
-
-## 2. 启动基础设施
-
-Docker Desktop 或 Docker Engine 启动后执行：
-
-```bash
-make infra-up
-```
-
-在 WSL 中使用 Docker Desktop 时，需要先在 Docker Desktop 设置里启用对应发行版的 WSL Integration。可运行 `make doctor` 检查本机命令、Docker daemon、`.env` 和模型文件。
-
-Compose 会启动：
-
-| 服务 | 本机端口 | 用途 |
-| --- | ---: | --- |
-| MySQL 8.0 | 3306 | 用户、会话和消息持久化 |
-| Redis Stack | 6379 | 验证码、缓存和 RAG 向量索引 |
-| RabbitMQ | 5672 / 15672 | 异步消息；15672 是管理界面 |
-
-默认开发凭据与 `.env.example` 一致。生产环境请在 `.env` 中改掉密码，并限制端口暴露范围。
-
-## 3. 启动服务
-
-在 `CogniGo-v2` 目录分别打开终端：
-
-```bash
-make run-mcp       # MCP 天气工具，监听 8081
-make run           # Go API，监听 9090
-make frontend-build # 生产构建（开发调试用 npm run serve）
-```
-
-开发前端（会读取 `.env` 中的 `COGNIGO_API_URL` 作为后端代理地址）：
-
-```bash
-make frontend-dev
-```
-
-浏览器访问 `http://127.0.0.1:8080`。前端开发服务器会把 `/api` 代理到 `http://127.0.0.1:9090`。
-
-## 4. 验证
+## 验证
 
 ```bash
 make test
 make vet
 make build
 make build-mcp
+make frontend-build
 ```
 
-真正启动后端前，必须先让 MySQL、Redis Stack 和 RabbitMQ 处于健康状态。MCP 模型还需要 `make run-mcp`，RAG 模型还需要有效的阿里百炼 Key 和 Redis Stack 向量索引。
-
-本地 `.env` 已被 Git 忽略。仍需由使用者填写的凭据是：阿里百炼 `OPENAI_API_KEY`、QQ 邮箱账号及 SMTP 授权码、百度 TTS API Key 和 Secret Key。不要把这些值写入 `config.toml` 或提交到仓库。
+以上是本地可运行与自动化检查范围，不代表已进行生产压测或第三方 RAG 基准评测。`.env`、上传文件、下载模型和构建产物均为本地数据，不应提交到 Git。

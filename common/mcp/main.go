@@ -10,6 +10,7 @@ import (
 
 	mcpclient "github.com/dinghen/CogniGo/common/mcp/client"
 	mcpserver "github.com/dinghen/CogniGo/common/mcp/server"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
@@ -42,33 +43,46 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// 创建客户端
+		// 创建客户端并完成 Initialize
 		httpURL := "http://localhost:8081/mcp"
-		mcpClient, err := mcpclient.NewMCPClient(httpURL)
+		mcpClient, err := mcpclient.NewMCPClient(ctx, httpURL)
 		if err != nil {
 			log.Fatalf("创建客户端失败: %v", err)
 		}
 		defer mcpClient.Close()
-
-		// 初始化客户端
-		if _, err := mcpClient.Initialize(ctx); err != nil {
-			log.Fatalf("初始化失败: %v", err)
-		}
 
 		// 执行健康检查
 		if err := mcpClient.Ping(ctx); err != nil {
 			log.Fatalf("健康检查失败: %v", err)
 		}
 
-		// 调用天气工具
-		result, err := mcpClient.CallWeatherTool(ctx, *city)
+		// 动态发现工具后调用天气工具
+		tools, err := mcpClient.ListTools(ctx)
+		if err != nil {
+			log.Fatalf("列出工具失败: %v", err)
+		}
+		found := false
+		for _, tool := range tools {
+			if tool.Name == "get_weather" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Fatalf("MCP 服务未提供 get_weather 工具")
+		}
+		result, err := mcpClient.CallTool(ctx, "get_weather", map[string]any{"city": *city})
 		if err != nil {
 			log.Fatalf("调用工具失败: %v", err)
 		}
 
 		// 显示天气结果
 		fmt.Println("\n天气查询结果:")
-		fmt.Println(mcpClient.GetToolResultText(result))
+		for _, content := range result.Content {
+			if text, ok := content.(*sdk.TextContent); ok {
+				fmt.Println(text.Text)
+			}
+		}
 
 		fmt.Println("\n客户端初始化成功。正在关闭...")
 	}

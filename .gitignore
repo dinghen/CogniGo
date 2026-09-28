@@ -1,6 +1,12 @@
 # Local secrets and runtime state
 .env
 **/.env
+.compose-demo.env
+.cognigo-demo.env
+/.agents/
+/.codegraph/
+/.codex/
+/.trellis/
 /uploads/
 /logs/
 /.local/

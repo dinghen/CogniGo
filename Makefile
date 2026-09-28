@@ -22,10 +22,10 @@ doctor:
 	@sh scripts/doctor.sh
 
 test: setup
-	$(GO) test ./...
+	$(GO) test ./... && (cd common/mcp && $(GO) test ./...)
 
 vet: setup
-	$(GO) vet ./...
+	$(GO) vet ./... && (cd common/mcp && $(GO) vet ./...)
 
 build: setup
 	$(GO) build -o "$(BACKEND_BIN)" .
@@ -54,7 +54,7 @@ frontend-build: frontend-install
 	npm run build --prefix vue-frontend
 
 infra-up:
-	docker compose up -d mysql redis rabbitmq
+	docker compose up -d mysql redis rabbitmq mailpit
 
 infra-down:
 	docker compose down
