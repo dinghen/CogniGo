@@ -54,7 +54,7 @@ frontend-build: frontend-install
 	npm run build --prefix vue-frontend
 
 infra-up:
-	docker compose up -d mysql redis rabbitmq
+	docker compose up -d mysql redis rabbitmq mailpit
 
 infra-down:
 	docker compose down

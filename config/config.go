@@ -18,6 +18,8 @@ type MainConfig struct {
 type EmailConfig struct {
 	Authcode string `toml:"authcode"`
 	Email    string `toml:"email" `
+	SMTPHost string `toml:"smtpHost"`
+	SMTPPort int    `toml:"smtpPort"`
 }
 
 type RedisConfig struct {
@@ -56,7 +58,6 @@ type RagModelConfig struct {
 	RagChatModelName        string  `toml:"chatModelName"`
 	RagDocDir               string  `toml:"docDir"`
 	RagBaseUrl              string  `toml:"baseUrl"`
-	RagDimension            int     `toml:"dimension"`
 	RagChunkSize            int     `toml:"chunkSize"`
 	RagChunkOverlap         int     `toml:"chunkOverlap"`
 	RagTopK                 int     `toml:"topK"`
@@ -142,6 +143,16 @@ func applyEnvironment(c *Config) error {
 	}
 	setString(&c.EmailConfig.Email, "COGNIGO_EMAIL")
 	setString(&c.EmailConfig.Authcode, "COGNIGO_EMAIL_AUTHCODE")
+	setString(&c.EmailConfig.SMTPHost, "COGNIGO_SMTP_HOST")
+	if err := setInt(&c.EmailConfig.SMTPPort, "COGNIGO_SMTP_PORT"); err != nil {
+		return err
+	}
+	if c.EmailConfig.SMTPHost == "" {
+		c.EmailConfig.SMTPHost = "localhost"
+	}
+	if c.EmailConfig.SMTPPort <= 0 {
+		c.EmailConfig.SMTPPort = 1025
+	}
 
 	setString(&c.RedisConfig.RedisHost, "COGNIGO_REDIS_HOST")
 	if err := setInt(&c.RedisConfig.RedisPort, "COGNIGO_REDIS_PORT"); err != nil {
@@ -180,9 +191,6 @@ func applyEnvironment(c *Config) error {
 	setString(&c.RagModelConfig.RagChatModelName, "COGNIGO_RAG_CHAT_MODEL")
 	setString(&c.RagModelConfig.RagDocDir, "COGNIGO_RAG_DOC_DIR")
 	setString(&c.RagModelConfig.RagBaseUrl, "COGNIGO_RAG_BASE_URL")
-	if err := setInt(&c.RagModelConfig.RagDimension, "COGNIGO_RAG_DIMENSION"); err != nil {
-		return err
-	}
 	if err := setInt(&c.RagModelConfig.RagChunkSize, "COGNIGO_RAG_CHUNK_SIZE"); err != nil {
 		return err
 	}

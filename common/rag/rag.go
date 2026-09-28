@@ -3,10 +3,12 @@ package rag
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	embeddingArk "github.com/cloudwego/eino-ext/components/embedding/ark"
 	redisIndexer "github.com/cloudwego/eino-ext/components/indexer/redis"
@@ -16,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/dinghen/CogniGo/common/redis"
 	"github.com/dinghen/CogniGo/config"
+	"github.com/google/uuid"
 	redisCli "github.com/redis/go-redis/v9"
 )
 
@@ -30,6 +33,7 @@ type RAGIndexer struct {
 	indexer   *redisIndexer.Indexer
 	username  string
 	filename  string
+	indexRef  redis.RAGIndexRef
 }
 
 type RAGQuery struct {
@@ -37,23 +41,36 @@ type RAGQuery struct {
 	retriever retriever.Retriever
 }
 
+var embeddingDimensionCache = struct {
+	sync.RWMutex
+	dimensions map[string]int
+}{dimensions: make(map[string]int)}
+
 func NewRAGIndexer(username, filename, embeddingModel string) (*RAGIndexer, error) {
 	ctx := context.Background()
 	cfg := config.GetConfig()
-	embedder, err := embeddingArk.NewEmbedder(ctx, &embeddingArk.EmbeddingConfig{
-		BaseURL: cfg.RagModelConfig.RagBaseUrl,
-		APIKey:  os.Getenv("OPENAI_API_KEY"),
-		Model:   embeddingModel,
-	})
+	embedder, err := newConfiguredEmbedder(ctx, cfg.RagModelConfig.RagBaseUrl, embeddingModel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedder: %w", err)
 	}
-	if err := redis.InitRedisIndex(ctx, username, filename, cfg.RagModelConfig.RagDimension); err != nil {
-		return nil, fmt.Errorf("failed to init redis index: %w", err)
+	dimension, err := embeddingDimension(ctx, embedder, cfg.RagModelConfig.RagBaseUrl, embeddingModel)
+	if err != nil {
+		return nil, fmt.Errorf("probe embedding dimension: %w", err)
+	}
+	return newRAGIndexer(ctx, username, filename, cfg.RagModelConfig.RagBaseUrl, embeddingModel, dimension, embedder)
+}
+
+func newRAGIndexer(ctx context.Context, username, filename, endpoint, model string, dimension int, embedder embedding.Embedder) (*RAGIndexer, error) {
+	indexRef, err := redis.NewRAGIndexRef(username, filename, endpoint, model, dimension, uuid.NewString())
+	if err != nil {
+		return nil, fmt.Errorf("create embedding index identity: %w", err)
+	}
+	if err := redis.CreateRAGIndex(ctx, indexRef); err != nil {
+		return nil, fmt.Errorf("create Redis RAG index: %w", err)
 	}
 	indexerConfig := &redisIndexer.IndexerConfig{
 		Client:    redis.Rdb,
-		KeyPrefix: redis.GenerateUserIndexNamePrefix(username, filename),
+		KeyPrefix: indexRef.KeyPrefix,
 		BatchSize: 10,
 		Embedding: embedder,
 		DocumentToHashes: func(_ context.Context, doc *schema.Document) (*redisIndexer.Hashes, error) {
@@ -74,12 +91,61 @@ func NewRAGIndexer(username, filename, embeddingModel string) (*RAGIndexer, erro
 	}
 	idx, err := redisIndexer.NewIndexer(ctx, indexerConfig)
 	if err != nil {
+		_ = redis.DeleteRAGIndexRef(ctx, indexRef)
 		return nil, fmt.Errorf("failed to create indexer: %w", err)
 	}
-	return &RAGIndexer{embedding: embedder, indexer: idx, username: username, filename: filename}, nil
+	return &RAGIndexer{embedding: embedder, indexer: idx, username: username, filename: filename, indexRef: indexRef}, nil
+}
+
+func newConfiguredEmbedder(ctx context.Context, endpoint, model string) (embedding.Embedder, error) {
+	return embeddingArk.NewEmbedder(ctx, &embeddingArk.EmbeddingConfig{
+		BaseURL: endpoint,
+		APIKey:  os.Getenv("OPENAI_API_KEY"),
+		Model:   model,
+	})
+}
+
+func probeEmbeddingDimension(ctx context.Context, embedder embedding.Embedder) (int, error) {
+	vectors, err := embedder.EmbedStrings(ctx, []string{"CogniGo embedding dimension probe"})
+	if err != nil {
+		return 0, fmt.Errorf("request embedding probe: %w", err)
+	}
+	if len(vectors) != 1 {
+		return 0, fmt.Errorf("embedding probe returned %d vectors, expected 1", len(vectors))
+	}
+	if len(vectors[0]) == 0 {
+		return 0, fmt.Errorf("embedding probe returned an empty vector")
+	}
+	return len(vectors[0]), nil
+}
+
+func embeddingDimension(ctx context.Context, embedder embedding.Embedder, endpoint, model string) (int, error) {
+	cacheKey := endpoint + "\x00" + model
+	embeddingDimensionCache.RLock()
+	dimension := embeddingDimensionCache.dimensions[cacheKey]
+	embeddingDimensionCache.RUnlock()
+	if dimension > 0 {
+		return dimension, nil
+	}
+	dimension, err := probeEmbeddingDimension(ctx, embedder)
+	if err != nil {
+		return 0, err
+	}
+	embeddingDimensionCache.Lock()
+	embeddingDimensionCache.dimensions[cacheKey] = dimension
+	embeddingDimensionCache.Unlock()
+	return dimension, nil
 }
 
 func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
+	activated := false
+	defer func() {
+		if !activated {
+			if err := redis.DeleteRAGIndexRef(ctx, r.indexRef); err != nil {
+				log.Printf("failed to clean incomplete RAG index generation %s: %v", r.indexRef.IndexName, err)
+			}
+		}
+	}()
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
@@ -101,6 +167,19 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	}
 	if _, err := r.indexer.Store(ctx, docs); err != nil {
 		return fmt.Errorf("failed to store document chunks: %w", err)
+	}
+	previous, err := redis.ActivateRAGIndex(ctx, r.username, r.filename, r.indexRef)
+	if err != nil {
+		return fmt.Errorf("activate indexed document: %w", err)
+	}
+	activated = true
+	if previous != nil && previous.IndexName != r.indexRef.IndexName {
+		if err := redis.DeleteRAGIndexRef(ctx, *previous); err != nil {
+			log.Printf("failed to remove previous RAG index generation %s: %v", previous.IndexName, err)
+		}
+	}
+	if err := redis.DeleteLegacyRAGIndex(ctx, r.username, r.filename); err != nil {
+		log.Printf("failed to remove legacy RAG index for %s: %v", r.filename, err)
 	}
 	return nil
 }
@@ -233,7 +312,7 @@ func metadataIntValue(metadata map[string]any, key string) int {
 }
 
 func DeleteIndex(ctx context.Context, username, filename string) error {
-	if err := redis.DeleteRedisIndex(ctx, username, filename); err != nil {
+	if err := redis.DeleteRAGIndex(ctx, username, filename); err != nil {
 		return fmt.Errorf("failed to delete redis index: %w", err)
 	}
 	return nil
@@ -241,10 +320,6 @@ func DeleteIndex(ctx context.Context, username, filename string) error {
 
 func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	cfg := config.GetConfig()
-	embedder, err := embeddingArk.NewEmbedder(ctx, &embeddingArk.EmbeddingConfig{BaseURL: cfg.RagModelConfig.RagBaseUrl, APIKey: os.Getenv("OPENAI_API_KEY"), Model: cfg.RagModelConfig.RagEmbeddingModel})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create embedder: %w", err)
-	}
 	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
 	files, err := os.ReadDir(userDir)
 	if err != nil || len(files) == 0 {
@@ -260,11 +335,39 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("no valid file found for user %s", username)
 	}
+	embedder, err := newConfiguredEmbedder(ctx, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embedder: %w", err)
+	}
+	dimension, err := embeddingDimension(ctx, embedder, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel)
+	if err != nil {
+		return nil, fmt.Errorf("probe embedding dimension: %w", err)
+	}
+	active, err := redis.GetActiveRAGIndex(ctx, username, filename)
+	if err != nil {
+		return nil, fmt.Errorf("inspect active RAG index: %w", err)
+	}
+	if active == nil || !active.MatchesEmbedding(cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension) {
+		indexer, err := newRAGIndexer(ctx, username, filename, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension, embedder)
+		if err != nil {
+			return nil, fmt.Errorf("prepare RAG index rebuild: %w", err)
+		}
+		if err := indexer.IndexFile(ctx, filepath.Join(userDir, filename)); err != nil {
+			return nil, fmt.Errorf("rebuild RAG index from %s: %w", filename, err)
+		}
+		active, err = redis.GetActiveRAGIndex(ctx, username, filename)
+		if err != nil {
+			return nil, fmt.Errorf("verify rebuilt RAG index: %w", err)
+		}
+	}
+	if active == nil || !active.MatchesEmbedding(cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension) {
+		return nil, fmt.Errorf("no compatible RAG index is active for embedding model %q", cfg.RagModelConfig.RagEmbeddingModel)
+	}
 	topK := cfg.RagModelConfig.RagTopK
 	if topK <= 0 {
 		topK = defaultTopK
 	}
-	rc := &redisRetriever.RetrieverConfig{Client: redis.Rdb, Index: redis.GenerateUserIndexName(username, filename), Dialect: 2, ReturnFields: []string{"content", "metadata", "source", "title", "user", "original_id", "chunk_index", "distance"}, TopK: topK, VectorField: "vector", Embedding: embedder, DocumentConverter: func(_ context.Context, doc redisCli.Document) (*schema.Document, error) {
+	rc := &redisRetriever.RetrieverConfig{Client: redis.Rdb, Index: active.IndexName, Dialect: 2, ReturnFields: []string{"content", "metadata", "source", "title", "user", "original_id", "chunk_index", "distance"}, TopK: topK, VectorField: "vector", Embedding: embedder, DocumentConverter: func(_ context.Context, doc redisCli.Document) (*schema.Document, error) {
 		result := &schema.Document{ID: doc.ID, MetaData: map[string]any{}}
 		for field, value := range doc.Fields {
 			if field == "content" {

@@ -6,6 +6,8 @@ port = 9090
 [emailConfig]
 authcode = ""
 email = ""
+smtpHost = "localhost"
+smtpPort = 1025
 
 [redisConfig]
 host = "127.0.0.1"
@@ -39,7 +41,6 @@ charset =  "utf8mb4"
   chatModelName="qwen-turbo"
   docDir = "./docs"
   baseUrl="https://dashscope.aliyuncs.com/compatible-mode/v1"
-  dimension=1024
   chunkSize=1000
   chunkOverlap=150
   topK=5

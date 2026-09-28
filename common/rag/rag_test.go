@@ -1,9 +1,74 @@
 package rag
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cloudwego/eino/components/embedding"
+	"github.com/dinghen/CogniGo/common/redis"
 )
+
+type fakeEmbedder struct {
+	vectors [][]float64
+	err     error
+}
+
+func (f fakeEmbedder) EmbedStrings(context.Context, []string, ...embedding.Option) ([][]float64, error) {
+	return f.vectors, f.err
+}
+
+func TestProbeEmbeddingDimension(t *testing.T) {
+	dimension, err := probeEmbeddingDimension(context.Background(), fakeEmbedder{vectors: [][]float64{{1, 2, 3, 4}}})
+	if err != nil {
+		t.Fatalf("probeEmbeddingDimension error = %v", err)
+	}
+	if dimension != 4 {
+		t.Fatalf("dimension = %d, want 4", dimension)
+	}
+}
+
+func TestProbeEmbeddingDimensionRejectsInvalidResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		fake fakeEmbedder
+	}{
+		{name: "provider error", fake: fakeEmbedder{err: errors.New("provider unavailable")}},
+		{name: "no vectors", fake: fakeEmbedder{}},
+		{name: "empty vector", fake: fakeEmbedder{vectors: [][]float64{{}}}},
+		{name: "unexpected vector count", fake: fakeEmbedder{vectors: [][]float64{{1}, {2}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if dimension, err := probeEmbeddingDimension(context.Background(), test.fake); err == nil || dimension != 0 {
+				t.Fatalf("probeEmbeddingDimension = (%d, %v), want (0, error)", dimension, err)
+			}
+		})
+	}
+}
+
+func TestEmbeddingIndexIdentityMismatchRequiresRebuild(t *testing.T) {
+	ref, err := redis.NewRAGIndexRef("alice", "doc.md", "https://embed.example/v1", "model-a", 4, "build-1")
+	if err != nil {
+		t.Fatalf("NewRAGIndexRef error = %v", err)
+	}
+	if !ref.MatchesEmbedding("https://embed.example/v1", "model-a", 4) {
+		t.Fatal("expected same endpoint, model, and dimension to match")
+	}
+	for _, identity := range []struct {
+		endpoint, model string
+		dimension       int
+	}{
+		{endpoint: "https://other.example/v1", model: "model-a", dimension: 4},
+		{endpoint: "https://embed.example/v1", model: "model-b", dimension: 4},
+		{endpoint: "https://embed.example/v1", model: "model-a", dimension: 8},
+	} {
+		if ref.MatchesEmbedding(identity.endpoint, identity.model, identity.dimension) {
+			t.Fatalf("identity unexpectedly matched: %#v", identity)
+		}
+	}
+}
 
 func TestSplitTextPreservesMarkdownSectionsAndStableIDs(t *testing.T) {
 	content := "# 第一章\n\n这是第一段内容。\n\n## 第二节\n\n这是第二段内容。"

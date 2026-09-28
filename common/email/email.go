@@ -3,6 +3,7 @@ package email
 import (
 	"fmt"
 	"github.com/dinghen/CogniGo/config"
+	"log"
 
 	"gopkg.in/gomail.v2"
 )
@@ -13,10 +14,15 @@ const (
 )
 
 func SendCaptcha(email, code, msg string) error {
+	settings := config.GetConfig().EmailConfig
 	m := gomail.NewMessage()
 
 	// 发件人
-	m.SetHeader("From", config.GetConfig().EmailConfig.Email)
+	from := settings.Email
+	if from == "" {
+		from = "no-reply@cognigo.local"
+	}
+	m.SetHeader("From", from)
 	// 收件人
 	m.SetHeader("To", email)
 	// 主题
@@ -25,13 +31,19 @@ func SendCaptcha(email, code, msg string) error {
 	m.SetBody("text/plain", msg+" "+code)
 
 	// 配置 SMTP 服务器和授权码,587：是 SMTP 的明文/STARTTLS 端口号
-	d := gomail.NewDialer("smtp.qq.com", 587, config.GetConfig().EmailConfig.Email, config.GetConfig().EmailConfig.Authcode)
+	smtpHost, smtpPort := settings.SMTPHost, settings.SMTPPort
+	if smtpHost == "" {
+		smtpHost = "smtp.qq.com"
+	}
+	if smtpPort <= 0 {
+		smtpPort = 587
+	}
+	d := gomail.NewDialer(smtpHost, smtpPort, settings.Email, settings.Authcode)
 
 	// 发送邮件
 	if err := d.DialAndSend(m); err != nil {
-		fmt.Printf("DialAndSend err %v:\n", err)
-		return err
+		return fmt.Errorf("send email through SMTP: %w", err)
 	}
-	fmt.Printf("send mail success\n")
+	log.Printf("verification email sent")
 	return nil
 }
