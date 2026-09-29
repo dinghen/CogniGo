@@ -64,7 +64,7 @@ func UploadRagFile(username string, file *multipart.FileHeader) (string, error) 
 		}
 	}()
 
-	indexer, err := rag.NewRAGIndexer(username, filename, config.GetConfig().RagModelConfig.RagEmbeddingModel)
+	indexer, err := rag.NewRAGIndexerForUser(username, filename)
 	if err != nil {
 		log.Printf("Failed to create RAG indexer: %v", err)
 		return "", err

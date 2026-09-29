@@ -20,6 +20,7 @@ import (
 	mcpclient "github.com/dinghen/CogniGo/common/mcp/client"
 	"github.com/dinghen/CogniGo/common/rag"
 	"github.com/dinghen/CogniGo/config"
+	providerService "github.com/dinghen/CogniGo/service/provider"
 )
 
 type StreamCallback func(msg string)
@@ -37,9 +38,18 @@ type OpenAIModel struct {
 }
 
 func NewOpenAIModel(ctx context.Context) (*OpenAIModel, error) {
-	key := os.Getenv("OPENAI_API_KEY")
-	modelName := os.Getenv("OPENAI_MODEL_NAME")
-	baseURL := os.Getenv("OPENAI_BASE_URL")
+	return newOpenAIModel(ctx, os.Getenv("OPENAI_BASE_URL"), os.Getenv("OPENAI_MODEL_NAME"), os.Getenv("OPENAI_API_KEY"))
+}
+
+func NewOpenAIModelForUser(ctx context.Context, username string) (*OpenAIModel, error) {
+	resolved, err := providerService.Resolve(username, "chat")
+	if err != nil {
+		return nil, fmt.Errorf("resolve chat provider: %w", err)
+	}
+	return newOpenAIModel(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
+}
+
+func newOpenAIModel(ctx context.Context, baseURL, modelName, key string) (*OpenAIModel, error) {
 
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		BaseURL: baseURL,
@@ -147,10 +157,19 @@ type AliRAGModel struct {
 }
 
 func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) {
-	key := os.Getenv("OPENAI_API_KEY")
-	conf := config.GetConfig()
-	modelName := conf.RagModelConfig.RagChatModelName
-	baseURL := conf.RagModelConfig.RagBaseUrl
+	resolved, err := providerService.Resolve(username, "chat")
+	if err != nil {
+		return nil, fmt.Errorf("resolve chat provider: %w", err)
+	}
+	if !resolved.FromUser {
+		conf := config.GetConfig()
+		resolved.BaseURL = conf.RagModelConfig.RagBaseUrl
+		resolved.Model = conf.RagModelConfig.RagChatModelName
+	}
+	return newAliRAGModel(ctx, username, resolved.BaseURL, resolved.Model, resolved.APIKey)
+}
+
+func newAliRAGModel(ctx context.Context, username, baseURL, modelName, key string) (*AliRAGModel, error) {
 
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		BaseURL: baseURL,
@@ -274,16 +293,16 @@ type MCPModel struct {
 
 // NewMCPModel 创建MCP模型实例
 func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
-	key := os.Getenv("OPENAI_API_KEY")
-	conf := config.GetConfig()
-	modelName := conf.RagModelConfig.RagChatModelName
-	baseURL := conf.RagModelConfig.RagBaseUrl
+	resolved, err := providerService.Resolve(username, "chat")
+	if err != nil {
+		return nil, fmt.Errorf("resolve chat provider for mcp: %w", err)
+	}
 
 	// 创建LLM
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL: baseURL,
-		Model:   modelName,
-		APIKey:  key,
+		BaseURL: resolved.BaseURL,
+		Model:   resolved.Model,
+		APIKey:  resolved.APIKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create mcp model failed: %w", err)

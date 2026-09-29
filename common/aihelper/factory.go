@@ -34,6 +34,9 @@ func GetGlobalFactory() *AIModelFactory {
 func (f *AIModelFactory) registerCreators() {
 	//OpenAI
 	f.creators["1"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
+		if username, ok := config["username"].(string); ok && username != "" {
+			return NewOpenAIModelForUser(ctx, username)
+		}
 		return NewOpenAIModel(ctx)
 	}
 

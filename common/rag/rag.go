@@ -18,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/dinghen/CogniGo/common/redis"
 	"github.com/dinghen/CogniGo/config"
+	providerService "github.com/dinghen/CogniGo/service/provider"
 	"github.com/google/uuid"
 	redisCli "github.com/redis/go-redis/v9"
 )
@@ -60,6 +61,32 @@ func NewRAGIndexer(username, filename, embeddingModel string) (*RAGIndexer, erro
 	return newRAGIndexer(ctx, username, filename, cfg.RagModelConfig.RagBaseUrl, embeddingModel, dimension, embedder)
 }
 
+// NewRAGIndexerForUser resolves the user's embedding provider and falls back to
+// deployment configuration when the user has not configured one.
+func NewRAGIndexerForUser(username, filename string) (*RAGIndexer, error) {
+	resolved, err := providerService.Resolve(username, "embedding")
+	if err != nil {
+		return nil, fmt.Errorf("resolve embedding provider: %w", err)
+	}
+	return NewRAGIndexerForProvider(username, filename, resolved)
+}
+
+// NewRAGIndexerForProvider creates an indexer from an already authorized user
+// provider. The caller must resolve the provider through the ownership-aware
+// provider service before passing it here.
+func NewRAGIndexerForProvider(username, filename string, resolved providerService.ResolvedConfig) (*RAGIndexer, error) {
+	ctx := context.Background()
+	embedder, err := newConfiguredEmbedderWithKey(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embedder: %w", err)
+	}
+	dimension, err := embeddingDimension(ctx, embedder, resolved.BaseURL, resolved.Model)
+	if err != nil {
+		return nil, fmt.Errorf("probe embedding dimension: %w", err)
+	}
+	return newRAGIndexer(ctx, username, filename, resolved.BaseURL, resolved.Model, dimension, embedder)
+}
+
 func newRAGIndexer(ctx context.Context, username, filename, endpoint, model string, dimension int, embedder embedding.Embedder) (*RAGIndexer, error) {
 	indexRef, err := redis.NewRAGIndexRef(username, filename, endpoint, model, dimension, uuid.NewString())
 	if err != nil {
@@ -98,11 +125,24 @@ func newRAGIndexer(ctx context.Context, username, filename, endpoint, model stri
 }
 
 func newConfiguredEmbedder(ctx context.Context, endpoint, model string) (embedding.Embedder, error) {
+	return newConfiguredEmbedderWithKey(ctx, endpoint, model, os.Getenv("OPENAI_API_KEY"))
+}
+
+func newConfiguredEmbedderWithKey(ctx context.Context, endpoint, model, apiKey string) (embedding.Embedder, error) {
 	return embeddingArk.NewEmbedder(ctx, &embeddingArk.EmbeddingConfig{
 		BaseURL: endpoint,
-		APIKey:  os.Getenv("OPENAI_API_KEY"),
+		APIKey:  apiKey,
 		Model:   model,
 	})
+}
+
+// ProbeEmbeddingConfig performs a real provider request and returns its vector dimension.
+func ProbeEmbeddingConfig(ctx context.Context, endpoint, model, apiKey string) (int, error) {
+	embedder, err := newConfiguredEmbedderWithKey(ctx, endpoint, model, apiKey)
+	if err != nil {
+		return 0, fmt.Errorf("create embedding client: %w", err)
+	}
+	return probeEmbeddingDimension(ctx, embedder)
 }
 
 func probeEmbeddingDimension(ctx context.Context, embedder embedding.Embedder) (int, error) {
@@ -318,6 +358,36 @@ func DeleteIndex(ctx context.Context, username, filename string) error {
 	return nil
 }
 
+// RebuildIndexForUserProvider explicitly rebuilds the current single-file
+// knowledge base with the selected embedding provider. Multi-file rebuilding
+// is owned by the personal knowledge-base task.
+func RebuildIndexForUserProvider(ctx context.Context, username string, resolved providerService.ResolvedConfig) (int, error) {
+	cfg := config.GetConfig()
+	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
+	entries, err := os.ReadDir(userDir)
+	if err != nil {
+		return 0, fmt.Errorf("read user knowledge directory: %w", err)
+	}
+	filename := ""
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			filename = entry.Name()
+			break
+		}
+	}
+	if filename == "" {
+		return 0, fmt.Errorf("no uploaded file found for user %s", username)
+	}
+	indexer, err := NewRAGIndexerForProvider(username, filename, resolved)
+	if err != nil {
+		return 0, fmt.Errorf("prepare RAG rebuild: %w", err)
+	}
+	if err := indexer.IndexFile(ctx, filepath.Join(userDir, filename)); err != nil {
+		return 0, fmt.Errorf("rebuild RAG index: %w", err)
+	}
+	return indexer.indexRef.Dimension, nil
+}
+
 func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	cfg := config.GetConfig()
 	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
@@ -335,11 +405,15 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("no valid file found for user %s", username)
 	}
-	embedder, err := newConfiguredEmbedder(ctx, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel)
+	resolved, err := providerService.Resolve(username, "embedding")
+	if err != nil {
+		return nil, fmt.Errorf("resolve embedding provider: %w", err)
+	}
+	embedder, err := newConfiguredEmbedderWithKey(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedder: %w", err)
 	}
-	dimension, err := embeddingDimension(ctx, embedder, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel)
+	dimension, err := embeddingDimension(ctx, embedder, resolved.BaseURL, resolved.Model)
 	if err != nil {
 		return nil, fmt.Errorf("probe embedding dimension: %w", err)
 	}
@@ -347,21 +421,11 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect active RAG index: %w", err)
 	}
-	if active == nil || !active.MatchesEmbedding(cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension) {
-		indexer, err := newRAGIndexer(ctx, username, filename, cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension, embedder)
-		if err != nil {
-			return nil, fmt.Errorf("prepare RAG index rebuild: %w", err)
-		}
-		if err := indexer.IndexFile(ctx, filepath.Join(userDir, filename)); err != nil {
-			return nil, fmt.Errorf("rebuild RAG index from %s: %w", filename, err)
-		}
-		active, err = redis.GetActiveRAGIndex(ctx, username, filename)
-		if err != nil {
-			return nil, fmt.Errorf("verify rebuilt RAG index: %w", err)
-		}
+	if active == nil || !active.MatchesEmbedding(resolved.BaseURL, resolved.Model, dimension) {
+		return nil, fmt.Errorf("RAG index requires rebuild for embedding provider %q", resolved.Model)
 	}
-	if active == nil || !active.MatchesEmbedding(cfg.RagModelConfig.RagBaseUrl, cfg.RagModelConfig.RagEmbeddingModel, dimension) {
-		return nil, fmt.Errorf("no compatible RAG index is active for embedding model %q", cfg.RagModelConfig.RagEmbeddingModel)
+	if active == nil || !active.MatchesEmbedding(resolved.BaseURL, resolved.Model, dimension) {
+		return nil, fmt.Errorf("no compatible RAG index is active for embedding model %q", resolved.Model)
 	}
 	topK := cfg.RagModelConfig.RagTopK
 	if topK <= 0 {

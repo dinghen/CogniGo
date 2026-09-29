@@ -80,15 +80,16 @@ type RuntimeConfig struct {
 }
 
 type Config struct {
-	EmailConfig        `toml:"emailConfig"`
-	RedisConfig        `toml:"redisConfig"`
-	MysqlConfig        `toml:"mysqlConfig"`
-	JwtConfig          `toml:"jwtConfig"`
-	MainConfig         `toml:"mainConfig"`
-	Rabbitmq           `toml:"rabbitmqConfig"`
-	RagModelConfig     `toml:"ragModelConfig"`
-	VoiceServiceConfig `toml:"voiceServiceConfig"`
-	RuntimeConfig      `toml:"runtimeConfig"`
+	EmailConfig           `toml:"emailConfig"`
+	RedisConfig           `toml:"redisConfig"`
+	MysqlConfig           `toml:"mysqlConfig"`
+	JwtConfig             `toml:"jwtConfig"`
+	MainConfig            `toml:"mainConfig"`
+	Rabbitmq              `toml:"rabbitmqConfig"`
+	RagModelConfig        `toml:"ragModelConfig"`
+	VoiceServiceConfig    `toml:"voiceServiceConfig"`
+	RuntimeConfig         `toml:"runtimeConfig"`
+	ProviderEncryptionKey string `toml:"-"`
 }
 
 type RedisKeyConfig struct {
@@ -222,6 +223,7 @@ func applyEnvironment(c *Config) error {
 	setString(&c.RuntimeConfig.ModelPath, "COGNIGO_ONNX_MODEL_PATH")
 	setString(&c.RuntimeConfig.LabelsPath, "COGNIGO_LABELS_PATH")
 	setString(&c.RuntimeConfig.MCPURL, "COGNIGO_MCP_URL")
+	setString(&c.ProviderEncryptionKey, "COGNIGO_PROVIDER_ENCRYPTION_KEY")
 	if err := setInt(&c.RuntimeConfig.MCPMaxSteps, "COGNIGO_MCP_MAX_STEPS"); err != nil {
 		return err
 	}

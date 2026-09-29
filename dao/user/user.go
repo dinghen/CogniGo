@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"github.com/dinghen/CogniGo/common/mysql"
 	"github.com/dinghen/CogniGo/model"
 	"github.com/dinghen/CogniGo/utils"
@@ -26,6 +27,14 @@ func IsExistUser(username string) (bool, *model.User) {
 	}
 
 	return true, user
+}
+
+// FindByUsername returns the authenticated user's record for ownership checks.
+func FindByUsername(username string) (*model.User, error) {
+	if mysql.DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
+	return mysql.GetUserByUsername(username)
 }
 
 func Register(username, email, password string) (*model.User, bool) {
