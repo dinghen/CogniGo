@@ -65,6 +65,7 @@ func migration() error {
 		new(model.Session),
 		new(model.Message),
 		new(model.ProviderConfig),
+		new(model.KnowledgeFile),
 	)
 }
 

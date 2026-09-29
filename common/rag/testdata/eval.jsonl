@@ -1,0 +1,2 @@
+{"query":"redis vector index","relevant_sources":["redis.md"],"document_set":[{"source":"mysql.md","content":"MySQL stores users and sessions."},{"source":"redis.md","content":"Redis Stack stores vector indexes for knowledge retrieval."}]}
+{"query":"rabbitmq message persistence","relevant_sources":["queue.md"],"document_set":[{"source":"queue.md","content":"RabbitMQ persists messages before asynchronous database writes."},{"source":"chat.md","content":"The chat API supports SSE responses."}]}

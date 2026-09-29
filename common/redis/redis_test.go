@@ -59,6 +59,22 @@ func TestRAGIndexRefIdentityAndValidation(t *testing.T) {
 	}
 }
 
+func TestActivateRAGIndexesValidatesClientAndInput(t *testing.T) {
+	previous := Rdb
+	Rdb = nil
+	t.Cleanup(func() { Rdb = previous })
+	if _, err := ActivateRAGIndexes(t.Context(), "alice", nil); err == nil {
+		t.Fatal("ActivateRAGIndexes should reject an empty generation set")
+	}
+	ref, err := NewRAGIndexRef("alice", "doc.md", "https://embed.example/v1", "model-a", 4, "build-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ActivateRAGIndexes(t.Context(), "alice", map[string]RAGIndexRef{"doc.md": ref}); !errors.Is(err, ErrNotInitialized) {
+		t.Fatalf("ActivateRAGIndexes error = %v, want ErrNotInitialized", err)
+	}
+}
+
 func TestFindRESPPairReadsNestedVectorDimension(t *testing.T) {
 	info := []interface{}{
 		"index_name", "rag_idx",

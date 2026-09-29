@@ -136,3 +136,17 @@ func TestBuildRAGPromptMarksReferencesAndNoHit(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluateJSONLReportsRecallAndMRR(t *testing.T) {
+	data := `{"query":"redis vector","relevant_sources":["a.md"],"document_set":[{"source":"b.md","content":"mysql"},{"source":"a.md","content":"redis vector index"}]}`
+	result, err := EvaluateJSONL(strings.NewReader(data), 1)
+	if err != nil {
+		t.Fatalf("EvaluateJSONL error = %v", err)
+	}
+	if result.Cases != 1 || result.RecallAtK != 1 || result.MRRAtK != 1 {
+		t.Fatalf("unexpected evaluation result: %#v", result)
+	}
+	if result.RetrievalCalls != 1 || result.EmbeddingCalls != 0 {
+		t.Fatalf("unexpected call counts: retrieval=%d embedding=%d", result.RetrievalCalls, result.EmbeddingCalls)
+	}
+}

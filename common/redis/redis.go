@@ -247,6 +247,53 @@ func ActivateRAGIndex(ctx context.Context, username, filename string, next RAGIn
 	return previous, nil
 }
 
+// ActivateRAGIndexes switches a complete user's set of file generations in a
+// single Redis transaction. The returned map contains the previous pointers so
+// callers can retire them only after metadata updates succeed.
+func ActivateRAGIndexes(ctx context.Context, username string, next map[string]RAGIndexRef) (map[string]*RAGIndexRef, error) {
+	if strings.TrimSpace(username) == "" || len(next) == 0 {
+		return nil, fmt.Errorf("username and at least one RAG index are required")
+	}
+	rdb, err := client()
+	if err != nil {
+		return nil, err
+	}
+	previous := make(map[string]*RAGIndexRef, len(next))
+	encoded := make(map[string][]byte, len(next))
+	for filename, ref := range next {
+		if err := ref.Validate(); err != nil {
+			return nil, err
+		}
+		dimension, err := redisIndexDimension(ctx, rdb, ref.IndexName)
+		if err != nil {
+			return nil, fmt.Errorf("verify replacement RAG index %s: %w", filename, err)
+		}
+		if dimension != ref.Dimension {
+			return nil, fmt.Errorf("replacement RAG index %s dimension is %d, expected %d", filename, dimension, ref.Dimension)
+		}
+		old, err := readActiveRAGIndex(ctx, rdb, username, filename)
+		if err != nil {
+			return nil, err
+		}
+		previous[filename] = old
+		value, err := json.Marshal(ref)
+		if err != nil {
+			return nil, fmt.Errorf("encode active RAG index %s: %w", filename, err)
+		}
+		encoded[filename] = value
+	}
+	_, err = rdb.TxPipelined(ctx, func(pipe redisCli.Pipeliner) error {
+		for filename, value := range encoded {
+			pipe.Set(ctx, activeRAGIndexKey(username, filename), value, 0)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("activate RAG index generations: %w", err)
+	}
+	return previous, nil
+}
+
 func readActiveRAGIndex(ctx context.Context, rdb *redisCli.Client, username, filename string) (*RAGIndexRef, error) {
 	if strings.TrimSpace(username) == "" || strings.TrimSpace(filename) == "" {
 		return nil, fmt.Errorf("username and filename are required")

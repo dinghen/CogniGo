@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/dinghen/CogniGo/common/mysql"
 	"github.com/dinghen/CogniGo/config"
+	knowledgeDAO "github.com/dinghen/CogniGo/dao/knowledge"
 	providerDAO "github.com/dinghen/CogniGo/dao/provider"
 	"github.com/dinghen/CogniGo/dao/user"
 	"github.com/dinghen/CogniGo/model"
@@ -250,6 +251,13 @@ func Update(username string, id uint64, input Input) (ProviderDTO, error) {
 	}
 	if err := providerDAO.Update(record); err != nil {
 		return ProviderDTO{}, err
+	}
+	// A probe can reveal a new model or dimension. Existing generations remain
+	// readable for rollback, but are marked stale until an explicit rebuild.
+	if oldKind == "embedding" && (oldModel != record.Model || oldURL != record.BaseURL) {
+		if err := knowledgeDAO.MarkStale(username); err != nil {
+			return ProviderDTO{}, fmt.Errorf("mark knowledge indexes stale: %w", err)
+		}
 	}
 	return toDTO(record), nil
 }

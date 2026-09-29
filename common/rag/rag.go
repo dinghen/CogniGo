@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/dinghen/CogniGo/common/redis"
 	"github.com/dinghen/CogniGo/config"
+	knowledgeDAO "github.com/dinghen/CogniGo/dao/knowledge"
+	"github.com/dinghen/CogniGo/model"
 	providerService "github.com/dinghen/CogniGo/service/provider"
 	"github.com/google/uuid"
 	redisCli "github.com/redis/go-redis/v9"
@@ -37,9 +40,13 @@ type RAGIndexer struct {
 	indexRef  redis.RAGIndexRef
 }
 
+func (r *RAGIndexer) Generation() string  { return r.indexRef.Generation }
+func (r *RAGIndexer) Fingerprint() string { return r.indexRef.Fingerprint }
+
 type RAGQuery struct {
-	embedding embedding.Embedder
-	retriever retriever.Retriever
+	embedding  embedding.Embedder
+	retrievers []retriever.Retriever
+	topK       int
 }
 
 var embeddingDimensionCache = struct {
@@ -178,6 +185,16 @@ func embeddingDimension(ctx context.Context, embedder embedding.Embedder, endpoi
 }
 
 func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
+	return r.indexFile(ctx, filePath, true, true)
+}
+
+// BuildFile writes a complete generation without changing the active pointer.
+// Batch rebuilds activate all built generations in one Redis transaction.
+func (r *RAGIndexer) BuildFile(ctx context.Context, filePath string) error {
+	return r.indexFile(ctx, filePath, false, false)
+}
+
+func (r *RAGIndexer) indexFile(ctx context.Context, filePath string, activate, retirePrevious bool) error {
 	activated := false
 	defer func() {
 		if !activated {
@@ -208,12 +225,16 @@ func (r *RAGIndexer) IndexFile(ctx context.Context, filePath string) error {
 	if _, err := r.indexer.Store(ctx, docs); err != nil {
 		return fmt.Errorf("failed to store document chunks: %w", err)
 	}
+	if !activate {
+		activated = true
+		return nil
+	}
 	previous, err := redis.ActivateRAGIndex(ctx, r.username, r.filename, r.indexRef)
 	if err != nil {
 		return fmt.Errorf("activate indexed document: %w", err)
 	}
 	activated = true
-	if previous != nil && previous.IndexName != r.indexRef.IndexName {
+	if retirePrevious && previous != nil && previous.IndexName != r.indexRef.IndexName {
 		if err := redis.DeleteRAGIndexRef(ctx, *previous); err != nil {
 			log.Printf("failed to remove previous RAG index generation %s: %v", previous.IndexName, err)
 		}
@@ -358,9 +379,19 @@ func DeleteIndex(ctx context.Context, username, filename string) error {
 	return nil
 }
 
-// RebuildIndexForUserProvider explicitly rebuilds the current single-file
-// knowledge base with the selected embedding provider. Multi-file rebuilding
-// is owned by the personal knowledge-base task.
+// ActiveIndexStatus reports whether a complete generation is active for a file.
+// It intentionally does not resolve the current provider; callers can use this
+// as a lightweight lifecycle status while retrieval performs compatibility checks.
+func ActiveIndexStatus(ctx context.Context, username, filename string) (bool, error) {
+	active, err := redis.GetActiveRAGIndex(ctx, username, filename)
+	if err != nil {
+		return false, err
+	}
+	return active != nil, nil
+}
+
+// RebuildIndexForUserProvider rebuilds every source while keeping previous
+// active generations available until all new generations are ready.
 func RebuildIndexForUserProvider(ctx context.Context, username string, resolved providerService.ResolvedConfig) (int, error) {
 	cfg := config.GetConfig()
 	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
@@ -368,41 +399,114 @@ func RebuildIndexForUserProvider(ctx context.Context, username string, resolved 
 	if err != nil {
 		return 0, fmt.Errorf("read user knowledge directory: %w", err)
 	}
-	filename := ""
+	files := make([]string, 0)
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			filename = entry.Name()
-			break
+		if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			files = append(files, entry.Name())
 		}
 	}
-	if filename == "" {
+	if len(files) == 0 {
 		return 0, fmt.Errorf("no uploaded file found for user %s", username)
 	}
-	indexer, err := NewRAGIndexerForProvider(username, filename, resolved)
+	sort.Strings(files)
+	previous := make(map[string]*redis.RAGIndexRef, len(files))
+	for _, filename := range files {
+		ref, err := redis.GetActiveRAGIndex(ctx, username, filename)
+		if err != nil {
+			return 0, fmt.Errorf("inspect active RAG index %s: %w", filename, err)
+		}
+		previous[filename] = ref
+		if err := knowledgeDAO.UpdateStatus(username, filename, model.KnowledgeIndexing, "", "", ""); err != nil {
+			return 0, fmt.Errorf("mark knowledge file indexing %s: %w", filename, err)
+		}
+	}
+	var dimension int
+	next := make(map[string]redis.RAGIndexRef, len(files))
+	for _, filename := range files {
+		indexer, err := NewRAGIndexerForProvider(username, filename, resolved)
+		if err != nil {
+			return cleanupBuiltGenerations(ctx, next, fmt.Errorf("prepare RAG rebuild: %w", err))
+		}
+		if err := indexer.BuildFile(ctx, filepath.Join(userDir, filename)); err != nil {
+			return cleanupBuiltGenerations(ctx, next, fmt.Errorf("rebuild RAG index %s: %w", filename, err))
+		}
+		next[filename] = indexer.indexRef
+		dimension = indexer.indexRef.Dimension
+	}
+	if _, err := redis.ActivateRAGIndexes(ctx, username, next); err != nil {
+		return cleanupBuiltGenerations(ctx, next, fmt.Errorf("activate rebuilt RAG indexes: %w", err))
+	}
+	for _, filename := range files {
+		active, err := redis.GetActiveRAGIndex(ctx, username, filename)
+		if err != nil {
+			return rollbackActivatedRebuild(ctx, username, previous, next, fmt.Errorf("inspect rebuilt RAG index %s: %w", filename, err))
+		}
+		if active == nil {
+			return rollbackActivatedRebuild(ctx, username, previous, next, fmt.Errorf("rebuilt RAG index %s is not active", filename))
+		}
+		if err := knowledgeDAO.UpdateStatus(username, filename, model.KnowledgeReady, "", active.Generation, active.Fingerprint); err != nil {
+			return rollbackActivatedRebuild(ctx, username, previous, next, fmt.Errorf("mark rebuilt knowledge file %s: %w", filename, err))
+		}
+	}
+	for _, filename := range files {
+		old, next := previous[filename], mustActive(ctx, username, filename)
+		if old != nil && next != nil && old.IndexName != next.IndexName {
+			if err := redis.DeleteRAGIndexRef(ctx, *old); err != nil {
+				log.Printf("failed to retire previous RAG index %s: %v", old.IndexName, err)
+			}
+		}
+	}
+	return dimension, nil
+}
+
+func mustActive(ctx context.Context, username, filename string) *redis.RAGIndexRef {
+	active, err := redis.GetActiveRAGIndex(ctx, username, filename)
 	if err != nil {
-		return 0, fmt.Errorf("prepare RAG rebuild: %w", err)
+		return nil
 	}
-	if err := indexer.IndexFile(ctx, filepath.Join(userDir, filename)); err != nil {
-		return 0, fmt.Errorf("rebuild RAG index: %w", err)
+	return active
+}
+
+func cleanupBuiltGenerations(ctx context.Context, next map[string]redis.RAGIndexRef, cause error) (int, error) {
+	for _, ref := range next {
+		_ = redis.DeleteRAGIndexRef(ctx, ref)
 	}
-	return indexer.indexRef.Dimension, nil
+	return 0, cause
+}
+
+func rollbackActivatedRebuild(ctx context.Context, username string, previous map[string]*redis.RAGIndexRef, next map[string]redis.RAGIndexRef, cause error) (int, error) {
+	for filename, old := range previous {
+		if old != nil {
+			_, _ = redis.ActivateRAGIndex(ctx, username, filename, *old)
+		} else {
+			_ = redis.DeleteRAGIndex(ctx, username, filename)
+		}
+		if ref, ok := next[filename]; ok {
+			_ = redis.DeleteRAGIndexRef(ctx, ref)
+		}
+		if old != nil {
+			_ = knowledgeDAO.UpdateStatus(username, filename, model.KnowledgeStale, cause.Error(), old.Generation, old.Fingerprint)
+		} else {
+			_ = knowledgeDAO.UpdateStatus(username, filename, model.KnowledgeFailed, cause.Error(), "", "")
+		}
+	}
+	return 0, cause
 }
 
 func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	cfg := config.GetConfig()
 	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
 	files, err := os.ReadDir(userDir)
-	if err != nil || len(files) == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("no uploaded file found for user %s", username)
 	}
-	filename := ""
+	filenames := make([]string, 0)
 	for _, file := range files {
-		if !file.IsDir() {
-			filename = file.Name()
-			break
+		if !file.IsDir() && !strings.HasPrefix(file.Name(), ".") {
+			filenames = append(filenames, file.Name())
 		}
 	}
-	if filename == "" {
+	if len(filenames) == 0 {
 		return nil, fmt.Errorf("no valid file found for user %s", username)
 	}
 	resolved, err := providerService.Resolve(username, "embedding")
@@ -417,60 +521,94 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 	if err != nil {
 		return nil, fmt.Errorf("probe embedding dimension: %w", err)
 	}
-	active, err := redis.GetActiveRAGIndex(ctx, username, filename)
-	if err != nil {
-		return nil, fmt.Errorf("inspect active RAG index: %w", err)
-	}
-	if active == nil || !active.MatchesEmbedding(resolved.BaseURL, resolved.Model, dimension) {
-		return nil, fmt.Errorf("RAG index requires rebuild for embedding provider %q", resolved.Model)
-	}
-	if active == nil || !active.MatchesEmbedding(resolved.BaseURL, resolved.Model, dimension) {
-		return nil, fmt.Errorf("no compatible RAG index is active for embedding model %q", resolved.Model)
-	}
 	topK := cfg.RagModelConfig.RagTopK
 	if topK <= 0 {
 		topK = defaultTopK
 	}
-	rc := &redisRetriever.RetrieverConfig{Client: redis.Rdb, Index: active.IndexName, Dialect: 2, ReturnFields: []string{"content", "metadata", "source", "title", "user", "original_id", "chunk_index", "distance"}, TopK: topK, VectorField: "vector", Embedding: embedder, DocumentConverter: func(_ context.Context, doc redisCli.Document) (*schema.Document, error) {
-		result := &schema.Document{ID: doc.ID, MetaData: map[string]any{}}
-		for field, value := range doc.Fields {
-			if field == "content" {
-				result.Content = value
-			} else if field == "chunk_index" {
-				if parsed, err := strconv.Atoi(value); err == nil {
-					result.MetaData[field] = parsed
+	makeRetriever := func(active *redis.RAGIndexRef) (retriever.Retriever, error) {
+		rc := &redisRetriever.RetrieverConfig{Client: redis.Rdb, Index: active.IndexName, Dialect: 2, ReturnFields: []string{"content", "metadata", "source", "title", "user", "original_id", "chunk_index", "distance"}, TopK: topK, VectorField: "vector", Embedding: embedder, DocumentConverter: func(_ context.Context, doc redisCli.Document) (*schema.Document, error) {
+			result := &schema.Document{ID: doc.ID, MetaData: map[string]any{}}
+			for field, value := range doc.Fields {
+				if field == "content" {
+					result.Content = value
+				} else if field == "chunk_index" {
+					if parsed, err := strconv.Atoi(value); err == nil {
+						result.MetaData[field] = parsed
+					} else {
+						result.MetaData[field] = value
+					}
+				} else if field == "distance" {
+					if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+						result.MetaData[field] = parsed
+					} else {
+						result.MetaData[field] = value
+					}
 				} else {
 					result.MetaData[field] = value
 				}
-			} else if field == "distance" {
-				if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-					result.MetaData[field] = parsed
-				} else {
-					result.MetaData[field] = value
-				}
-			} else {
-				result.MetaData[field] = value
 			}
+			return result, nil
+		}}
+		if cfg.RagModelConfig.RagUseDistanceThreshold {
+			threshold := cfg.RagModelConfig.RagDistanceThreshold
+			rc.DistanceThreshold = &threshold
 		}
-		return result, nil
-	}}
-	if cfg.RagModelConfig.RagUseDistanceThreshold {
-		threshold := cfg.RagModelConfig.RagDistanceThreshold
-		rc.DistanceThreshold = &threshold
+		return redisRetriever.NewRetriever(ctx, rc)
 	}
-	rtr, err := redisRetriever.NewRetriever(ctx, rc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create retriever: %w", err)
+	retrievers := make([]retriever.Retriever, 0, len(filenames))
+	for _, filename := range filenames {
+		active, err := redis.GetActiveRAGIndex(ctx, username, filename)
+		if err != nil {
+			return nil, fmt.Errorf("inspect active RAG index: %w", err)
+		}
+		if active == nil {
+			continue
+		}
+		if !active.MatchesEmbedding(resolved.BaseURL, resolved.Model, dimension) {
+			continue
+		}
+		rtr, err := makeRetriever(active)
+		if err != nil {
+			return nil, fmt.Errorf("create retriever for %s: %w", filename, err)
+		}
+		retrievers = append(retrievers, rtr)
 	}
-	return &RAGQuery{embedding: embedder, retriever: rtr}, nil
+	if len(retrievers) == 0 {
+		return nil, fmt.Errorf("RAG index requires rebuild for embedding provider %q", resolved.Model)
+	}
+	return &RAGQuery{embedding: embedder, retrievers: retrievers, topK: topK}, nil
 }
 
 func (r *RAGQuery) RetrieveDocuments(ctx context.Context, query string) ([]*schema.Document, error) {
-	docs, err := r.retriever.Retrieve(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve documents: %w", err)
+	all := make([]*schema.Document, 0)
+	for _, item := range r.retrievers {
+		docs, err := item.Retrieve(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve documents: %w", err)
+		}
+		all = append(all, docs...)
 	}
-	return docs, nil
+	sort.SliceStable(all, func(i, j int) bool { return documentDistance(all[i]) < documentDistance(all[j]) })
+	if r.topK > 0 && len(all) > r.topK {
+		all = all[:r.topK]
+	}
+	return all, nil
+}
+
+func documentDistance(doc *schema.Document) float64 {
+	if doc == nil || doc.MetaData == nil {
+		return 1
+	}
+	switch value := doc.MetaData["distance"].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case string:
+		v, _ := strconv.ParseFloat(value, 64)
+		return v
+	}
+	return 1
 }
 
 func BuildRAGPrompt(query string, docs []*schema.Document) string {
