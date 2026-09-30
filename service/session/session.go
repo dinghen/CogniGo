@@ -2,10 +2,12 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/dinghen/CogniGo/common/aihelper"
 	"github.com/dinghen/CogniGo/common/code"
 	"github.com/dinghen/CogniGo/dao/session"
 	"github.com/dinghen/CogniGo/model"
+	mcpService "github.com/dinghen/CogniGo/service/mcp"
 	"log"
 	"net/http"
 
@@ -32,13 +34,31 @@ func GetUserSessionsByUserName(userName string) ([]model.SessionInfo, error) {
 	return SessionInfos, nil
 }
 
-func CreateSessionAndSendMessage(userName string, userQuestion string, modelType string) (string, string, code.Code) {
+func sessionMCPSelection(sessionID string) ([]uint64, []uint64) {
+	row, err := session.GetSessionByID(sessionID)
+	if err != nil {
+		return nil, nil
+	}
+	var servers, tools []uint64
+	_ = json.Unmarshal([]byte(row.MCPServerIDsJSON), &servers)
+	_ = json.Unmarshal([]byte(row.MCPToolIDsJSON), &tools)
+	return servers, tools
+}
+
+func CreateSessionAndSendMessage(userName string, userQuestion string, modelType string, mcpServerIDs, mcpToolIDs []uint64) (string, string, code.Code) {
+	if err := mcpService.ValidateSelection(userName, mcpServerIDs, mcpToolIDs); err != nil {
+		return "", "", code.CodeInvalidParams
+	}
+	serverJSON, _ := json.Marshal(mcpServerIDs)
+	toolJSON, _ := json.Marshal(mcpToolIDs)
 	//1：创建一个新的会话
 	newSession := &model.Session{
 		ID:       uuid.New().String(),
 		UserName: userName,
 		Title:    userQuestion, // 可以根据需求设置标题，这边暂时用用户第一次的问题作为标题
 	}
+	newSession.MCPServerIDsJSON = string(serverJSON)
+	newSession.MCPToolIDsJSON = string(toolJSON)
 	createdSession, err := session.CreateSession(newSession)
 	if err != nil {
 		log.Println("CreateSessionAndSendMessage CreateSession error:", err)
@@ -48,7 +68,9 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 	//2：获取AIHelper并通过其管理消息
 	manager := aihelper.GetGlobalManager()
 	config := map[string]interface{}{
-		"username": userName, // 用于 RAG 模型获取用户文档
+		"username":     userName, // 用于 RAG 模型获取用户文档
+		"mcpServerIDs": mcpServerIDs,
+		"mcpToolIDs":   mcpToolIDs,
 	}
 	helper, err := manager.GetOrCreateAIHelper(userName, createdSession.ID, modelType, config)
 	if err != nil {
@@ -66,11 +88,18 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 	return createdSession.ID, aiResponse.Content, code.CodeSuccess
 }
 
-func CreateStreamSessionOnly(userName string, userQuestion string) (string, code.Code) {
+func CreateStreamSessionOnly(userName string, userQuestion string, mcpServerIDs, mcpToolIDs []uint64) (string, code.Code) {
+	if err := mcpService.ValidateSelection(userName, mcpServerIDs, mcpToolIDs); err != nil {
+		return "", code.CodeInvalidParams
+	}
+	serverJSON, _ := json.Marshal(mcpServerIDs)
+	toolJSON, _ := json.Marshal(mcpToolIDs)
 	newSession := &model.Session{
-		ID:       uuid.New().String(),
-		UserName: userName,
-		Title:    userQuestion,
+		ID:               uuid.New().String(),
+		UserName:         userName,
+		Title:            userQuestion,
+		MCPServerIDsJSON: string(serverJSON),
+		MCPToolIDsJSON:   string(toolJSON),
 	}
 	createdSession, err := session.CreateSession(newSession)
 	if err != nil {
@@ -92,6 +121,7 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 	config := map[string]interface{}{
 		"username": userName, // 用于 RAG 模型获取用户文档
 	}
+	config["mcpServerIDs"], config["mcpToolIDs"] = sessionMCPSelection(sessionID)
 	helper, err := manager.GetOrCreateAIHelper(userName, sessionID, modelType, config)
 	if err != nil {
 		log.Println("StreamMessageToExistingSession GetOrCreateAIHelper error:", err)
@@ -127,9 +157,9 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 	return code.CodeSuccess
 }
 
-func CreateStreamSessionAndSendMessage(userName string, userQuestion string, modelType string, writer http.ResponseWriter) (string, code.Code) {
+func CreateStreamSessionAndSendMessage(userName string, userQuestion string, modelType string, writer http.ResponseWriter, mcpServerIDs, mcpToolIDs []uint64) (string, code.Code) {
 
-	sessionID, code_ := CreateStreamSessionOnly(userName, userQuestion)
+	sessionID, code_ := CreateStreamSessionOnly(userName, userQuestion, mcpServerIDs, mcpToolIDs)
 	if code_ != code.CodeSuccess {
 		return "", code_
 	}
@@ -149,6 +179,7 @@ func ChatSend(userName string, sessionID string, userQuestion string, modelType 
 	config := map[string]interface{}{
 		"username": userName, // 用于 RAG 模型获取用户文档（若当前用户选择了RAG模型，该字段将会被用到）
 	}
+	config["mcpServerIDs"], config["mcpToolIDs"] = sessionMCPSelection(sessionID)
 	helper, err := manager.GetOrCreateAIHelper(userName, sessionID, modelType, config)
 	if err != nil {
 		log.Println("ChatSend GetOrCreateAIHelper error:", err)

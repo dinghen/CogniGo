@@ -4,6 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -16,21 +23,132 @@ type MCPClient struct {
 	session *sdk.ClientSession
 }
 
+// Config describes a user-approved MCP transport. It intentionally contains
+// plaintext secrets only for the lifetime of a request.
+type Config struct {
+	Transport        string
+	URL              string
+	Headers          map[string]string
+	Command          string
+	Args             []string
+	Env              map[string]string
+	AllowPrivateHTTP bool
+}
+
+// Selection is the user-authorized runtime view of one MCP server.
+type Selection struct {
+	ServerID     uint64
+	Config       Config
+	AllowedTools map[string]struct{}
+}
+
 // NewMCPClient connects and performs the official Initialize handshake.
 func NewMCPClient(ctx context.Context, httpURL string) (*MCPClient, error) {
+	// The fixed demo URL may point at a local in-process test server. User-owned
+	// configurations use NewMCPClientWithConfig with the SSRF policy applied by
+	// the service layer.
+	return NewMCPClientWithConfig(ctx, Config{Transport: "streamable-http", URL: httpURL, AllowPrivateHTTP: true})
+}
+
+// NewMCPClientWithConfig constructs an official SDK client for either
+// Streamable HTTP or stdio. Commands are passed directly to exec.Command.
+func NewMCPClientWithConfig(ctx context.Context, cfg Config) (*MCPClient, error) {
 	client := sdk.NewClient(&sdk.Implementation{Name: "cognigo", Version: "1.0.0"}, &sdk.ClientOptions{
 		Capabilities: &sdk.ClientCapabilities{},
 		// Registering the handler enables the SDK's subscriptions/listen stream;
 		// the SDK invalidates its ListTools cache when a list-changed notification arrives.
 		ToolListChangedHandler: func(context.Context, *sdk.ToolListChangedRequest) {},
 	})
-	transport := &sdk.StreamableClientTransport{Endpoint: httpURL}
+	var transport sdk.Transport
+	switch strings.ToLower(strings.TrimSpace(cfg.Transport)) {
+	case "", "streamable-http", "http":
+		if strings.TrimSpace(cfg.URL) == "" {
+			return nil, fmt.Errorf("MCP HTTP URL is required")
+		}
+		transport = &sdk.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: headerClient(cfg.Headers, cfg.AllowPrivateHTTP), MaxRetries: 1}
+	case "stdio":
+		if strings.TrimSpace(cfg.Command) == "" {
+			return nil, fmt.Errorf("MCP command is required")
+		}
+		cmd := exec.Command(cfg.Command, cfg.Args...)
+		cmd.Env = append(os.Environ(), mapEnv(cfg.Env)...)
+		transport = &sdk.CommandTransport{Command: cmd}
+	default:
+		return nil, fmt.Errorf("unsupported MCP transport %q", cfg.Transport)
+	}
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("connect MCP server: %w", err)
 	}
 	return &MCPClient{session: session}, nil
 }
+
+func mapEnv(values map[string]string) []string {
+	out := make([]string, 0, len(values))
+	for key, value := range values {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func headerClient(headers map[string]string, allowPrivate bool) *http.Client {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.Proxy = nil
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	base.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, item := range ips {
+			ip := item.IP
+			if !allowPrivate && !isPublicAddress(ip) {
+				lastErr = fmt.Errorf("MCP target resolves to a non-public address")
+				continue
+			}
+			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("MCP target resolved to no addresses")
+		}
+		return nil, lastErr
+	}
+	return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		for key, value := range headers {
+			clone.Header.Set(key, value)
+		}
+		return base.RoundTrip(clone)
+	}), CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameOrigin(req.URL, via[len(via)-1].URL) {
+			return fmt.Errorf("MCP redirect to another origin is not allowed")
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("too many MCP redirects")
+		}
+		return nil
+	}}
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+func isPublicAddress(ip net.IP) bool {
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func (m *MCPClient) Session() *sdk.ClientSession {
 	if m == nil {
@@ -87,12 +205,23 @@ func (m *MCPClient) Close() error {
 
 // EinoTools discovers all server tools and adapts them to Eino's native tool interface.
 func (m *MCPClient) EinoTools(ctx context.Context) ([]tool.BaseTool, error) {
+	return m.EinoToolsAllowed(ctx, nil)
+}
+
+// EinoToolsAllowed discovers tools and optionally limits the result to the
+// names selected for the current session. A nil allowlist means all tools.
+func (m *MCPClient) EinoToolsAllowed(ctx context.Context, allowed map[string]struct{}) ([]tool.BaseTool, error) {
 	tools, err := m.ListTools(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]tool.BaseTool, 0, len(tools))
 	for _, item := range tools {
+		if allowed != nil {
+			if _, ok := allowed[item.Name]; !ok {
+				continue
+			}
+		}
 		adapted, err := NewEinoTool(m, item)
 		if err != nil {
 			name := "<unknown>"

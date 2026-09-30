@@ -66,6 +66,8 @@ func migration() error {
 		new(model.Message),
 		new(model.ProviderConfig),
 		new(model.KnowledgeFile),
+		new(model.MCPServer),
+		new(model.MCPTool),
 	)
 }
 

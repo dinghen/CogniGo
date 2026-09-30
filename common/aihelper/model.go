@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/ollama"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/flow/agent/react"
@@ -20,6 +21,7 @@ import (
 	mcpclient "github.com/dinghen/CogniGo/common/mcp/client"
 	"github.com/dinghen/CogniGo/common/rag"
 	"github.com/dinghen/CogniGo/config"
+	mcpService "github.com/dinghen/CogniGo/service/mcp"
 	providerService "github.com/dinghen/CogniGo/service/provider"
 )
 
@@ -285,14 +287,19 @@ func (o *AliRAGModel) GetModelType() string { return "2" }
 
 // MCPModel MCP模型实现，集成MCP服务
 type MCPModel struct {
-	llm        model.ToolCallingChatModel
-	mcpClient  *mcpclient.MCPClient
-	mcpBaseURL string
-	mu         sync.Mutex
+	llm           model.ToolCallingChatModel
+	mcpClients    []*mcpclient.MCPClient
+	mcpBaseURL    string
+	mcpSelections []mcpService.RuntimeSelection
+	mu            sync.Mutex
 }
 
 // NewMCPModel 创建MCP模型实例
 func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
+	return NewMCPModelWithSelections(ctx, username, nil, nil)
+}
+
+func NewMCPModelWithSelections(ctx context.Context, username string, serverIDs, toolIDs []uint64) (*MCPModel, error) {
 	resolved, err := providerService.Resolve(username, "chat")
 	if err != nil {
 		return nil, fmt.Errorf("resolve chat provider for mcp: %w", err)
@@ -313,21 +320,55 @@ func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
 		mcpBaseURL = value
 	}
 
-	return &MCPModel{llm: llm, mcpBaseURL: mcpBaseURL}, nil
+	selections, err := mcpService.ResolveRuntimeSelections(username, serverIDs, toolIDs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve MCP session selection: %w", err)
+	}
+	return &MCPModel{llm: llm, mcpBaseURL: mcpBaseURL, mcpSelections: selections}, nil
 }
 
-func (m *MCPModel) getMCPClient(ctx context.Context) (*mcpclient.MCPClient, error) {
+func (m *MCPModel) getMCPClients(ctx context.Context) ([]*mcpclient.MCPClient, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.mcpClient != nil {
-		return m.mcpClient, nil
+	if len(m.mcpClients) > 0 {
+		return m.mcpClients, nil
 	}
-	client, err := mcpclient.NewMCPClient(ctx, m.mcpBaseURL)
+	if len(m.mcpSelections) == 0 {
+		return nil, fmt.Errorf("no MCP servers selected for this session")
+	}
+	clients := make([]*mcpclient.MCPClient, 0, len(m.mcpSelections))
+	for _, selection := range m.mcpSelections {
+		client, err := mcpclient.NewMCPClientWithConfig(ctx, selection.Config)
+		if err != nil {
+			for _, connected := range clients {
+				_ = connected.Close()
+			}
+			return nil, err
+		}
+		clients = append(clients, client)
+	}
+	m.mcpClients = clients
+	return clients, nil
+}
+
+func (m *MCPModel) einoTools(ctx context.Context) ([]tool.BaseTool, error) {
+	clients, err := m.getMCPClients(ctx)
 	if err != nil {
 		return nil, err
 	}
-	m.mcpClient = client
-	return client, nil
+	var out []tool.BaseTool
+	for i, client := range clients {
+		var allowed map[string]struct{}
+		if i < len(m.mcpSelections) {
+			allowed = m.mcpSelections[i].AllowedTools
+		}
+		tools, err := client.EinoToolsAllowed(ctx, allowed)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tools...)
+	}
+	return out, nil
 }
 
 // GenerateResponse 生成响应，集成MCP工具
@@ -335,11 +376,7 @@ func (m *MCPModel) GenerateResponse(ctx context.Context, messages []*schema.Mess
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages provided")
 	}
-	client, err := m.getMCPClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	tools, err := client.EinoTools(ctx)
+	tools, err := m.einoTools(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -359,11 +396,7 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 	if len(messages) == 0 {
 		return "", fmt.Errorf("no messages provided")
 	}
-	client, err := m.getMCPClient(ctx)
-	if err != nil {
-		return "", err
-	}
-	tools, err := client.EinoTools(ctx)
+	tools, err := m.einoTools(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -417,8 +450,8 @@ func (m *MCPModel) GetModelType() string { return "3" }
 func (m *MCPModel) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.mcpClient != nil {
-		_ = m.mcpClient.Close()
-		m.mcpClient = nil
+	for _, client := range m.mcpClients {
+		_ = client.Close()
 	}
+	m.mcpClients = nil
 }
