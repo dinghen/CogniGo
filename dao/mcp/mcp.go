@@ -47,6 +47,10 @@ func DeleteServer(userID int64, id uint64) error {
 		return errors.New("database is not initialized")
 	}
 	return mysql.DB.Transaction(func(tx *gorm.DB) error {
+		var owned model.MCPServer
+		if err := tx.Where("user_id = ? AND id = ?", userID, id).First(&owned).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("server_id = ?", id).Delete(&model.MCPTool{}).Error; err != nil {
 			return err
 		}

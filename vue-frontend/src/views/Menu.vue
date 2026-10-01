@@ -3,6 +3,7 @@
     <el-header class="header">
       <h1>AI应用平台</h1>
       <el-button type="danger" @click="handleLogout">退出登录</el-button>
+      <el-button type="primary" plain @click="$router.push('/settings')">配置中心</el-button>
     </el-header>
     <el-main class="main">
       <div class="menu-grid">

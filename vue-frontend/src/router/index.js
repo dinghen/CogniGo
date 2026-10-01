@@ -4,6 +4,7 @@ import Register from '../views/Register.vue'
 import Menu from '../views/Menu.vue'
 import AIChat from '../views/AIChat.vue'
 import ImageRecognition from '../views/ImageRecognition.vue'
+import Settings from '../views/Settings.vue'
 
 const routes = [
   {
@@ -36,6 +37,12 @@ const routes = [
     path: '/image-recognition',
     name: 'ImageRecognition',
     component: ImageRecognition,
+    meta: { requiresAuth: true }
+  },
+  {
+    path: '/settings',
+    name: 'Settings',
+    component: Settings,
     meta: { requiresAuth: true }
   }
 ]

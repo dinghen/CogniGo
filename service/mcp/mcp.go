@@ -251,19 +251,34 @@ func save(username string, id uint64, in Input) (DTO, error) {
 	if err != nil {
 		return DTO{}, err
 	}
-	h, e := seal(in.Headers)
-	if e != nil {
-		return DTO{}, e
+	var existing *model.MCPServer
+	if id != 0 {
+		existing, err = mcpDAO.GetServer(uid, id)
+		if err != nil {
+			return DTO{}, mcpDAO.ErrNotFound
+		}
 	}
-	env, e := seal(in.Env)
-	if e != nil {
-		return DTO{}, e
+	headerCipher, envCipher := "", ""
+	if existing != nil {
+		headerCipher, envCipher = existing.EncryptedHeaders, existing.EncryptedEnv
+	}
+	if len(in.Headers) > 0 {
+		headerCipher, err = seal(in.Headers)
+		if err != nil {
+			return DTO{}, err
+		}
+	}
+	if len(in.Env) > 0 {
+		envCipher, err = seal(in.Env)
+		if err != nil {
+			return DTO{}, err
+		}
 	}
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
-	row := &model.MCPServer{UserID: uid, Name: strings.TrimSpace(in.Name), Transport: strings.ToLower(strings.TrimSpace(in.Transport)), URL: strings.TrimRight(strings.TrimSpace(in.URL), "/"), EncryptedHeaders: h, Command: strings.TrimSpace(in.Command), ArgsJSON: argsJSON(in.Args), EncryptedEnv: env, Enabled: enabled, Status: "unverified"}
+	row := &model.MCPServer{UserID: uid, Name: strings.TrimSpace(in.Name), Transport: strings.ToLower(strings.TrimSpace(in.Transport)), URL: strings.TrimRight(strings.TrimSpace(in.URL), "/"), EncryptedHeaders: headerCipher, Command: strings.TrimSpace(in.Command), ArgsJSON: argsJSON(in.Args), EncryptedEnv: envCipher, Enabled: enabled, Status: "unverified"}
 	if row.Transport == "http" {
 		row.Transport = "streamable-http"
 	}
@@ -272,10 +287,6 @@ func save(username string, id uint64, in Input) (DTO, error) {
 			return DTO{}, err
 		}
 	} else {
-		existing, e := mcpDAO.GetServer(uid, id)
-		if e != nil {
-			return DTO{}, mcpDAO.ErrNotFound
-		}
 		row.ID = id
 		row.Status = existing.Status
 		if err := mcpDAO.UpdateServer(row); err != nil {
