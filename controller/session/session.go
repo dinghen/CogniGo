@@ -17,8 +17,10 @@ type (
 		Sessions []model.SessionInfo `json:"sessions,omitempty"`
 	}
 	CreateSessionAndSendMessageRequest struct {
-		UserQuestion string `json:"question" binding:"required"`  // 用户问题;
-		ModelType    string `json:"modelType" binding:"required"` // 模型类型;
+		UserQuestion string   `json:"question" binding:"required"`  // 用户问题;
+		ModelType    string   `json:"modelType" binding:"required"` // 模型类型;
+		MCPServerIDs []uint64 `json:"mcpServerIds,omitempty"`
+		MCPToolIDs   []uint64 `json:"mcpToolIds,omitempty"`
 	}
 
 	CreateSessionAndSendMessageResponse struct {
@@ -28,9 +30,11 @@ type (
 	}
 
 	ChatSendRequest struct {
-		UserQuestion string `json:"question" binding:"required"`            // 用户问题;
-		ModelType    string `json:"modelType" binding:"required"`           // 模型类型;
-		SessionID    string `json:"sessionId,omitempty" binding:"required"` // 当前会话ID
+		UserQuestion string   `json:"question" binding:"required"`            // 用户问题;
+		ModelType    string   `json:"modelType" binding:"required"`           // 模型类型;
+		SessionID    string   `json:"sessionId,omitempty" binding:"required"` // 当前会话ID
+		MCPServerIDs []uint64 `json:"mcpServerIds,omitempty"`
+		MCPToolIDs   []uint64 `json:"mcpToolIds,omitempty"`
 	}
 
 	ChatSendResponse struct {
@@ -71,7 +75,7 @@ func CreateSessionAndSendMessage(c *gin.Context) {
 		return
 	}
 	//内部会创建会话并发送消息，并会将AI回答、当前会话返回
-	session_id, aiInformation, code_ := session.CreateSessionAndSendMessage(userName, req.UserQuestion, req.ModelType)
+	session_id, aiInformation, code_ := session.CreateSessionAndSendMessage(userName, req.UserQuestion, req.ModelType, req.MCPServerIDs, req.MCPToolIDs)
 
 	if code_ != code.CodeSuccess {
 		c.JSON(http.StatusOK, res.CodeOf(code_))
@@ -100,7 +104,7 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
 
 	// 先创建会话并立即把 sessionId 下发给前端，随后再开始流式输出
-	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion)
+	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.MCPServerIDs, req.MCPToolIDs)
 	if code_ != code.CodeSuccess {
 		c.SSEvent("error", gin.H{"message": "Failed to create session"})
 		return

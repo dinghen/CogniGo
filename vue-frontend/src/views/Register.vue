@@ -166,8 +166,14 @@ export default {
               password: registerForm.password
         })
         if (response.data.status_code === 1000) {
-          ElMessage.success('注册成功，请登录')
-          router.push('/login')
+          if (!response.data.token) {
+            ElMessage.error('注册成功，但未收到登录凭证，请前往登录页面')
+            router.push('/login')
+            return
+          }
+          localStorage.setItem('token', response.data.token)
+          ElMessage.success('注册成功')
+          router.push('/menu')
         } else {
           ElMessage.error(response.data.status_msg || '注册失败')
         }

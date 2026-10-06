@@ -19,3 +19,13 @@ func GenerateIndexNamePrefix(filename string) string {
 	prefix := fmt.Sprintf(config.DefaultRedisKeyConfig.IndexNamePrefix, filename)
 	return prefix
 }
+
+// GenerateUserIndexName scopes a knowledge-base index to one user and file.
+func GenerateUserIndexName(username, filename string) string {
+	return fmt.Sprintf("rag_docs:%s:%s:idx", username, filename)
+}
+
+// GenerateUserIndexNamePrefix returns the Redis hash prefix for one user/file index.
+func GenerateUserIndexNamePrefix(username, filename string) string {
+	return fmt.Sprintf("rag_docs:%s:%s:", username, filename)
+}

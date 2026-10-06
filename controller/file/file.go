@@ -15,6 +15,10 @@ type (
 		FilePath string `json:"file_path,omitempty"`
 		controller.Response
 	}
+	ListFileResponse struct {
+		controller.Response
+		Files []file.FileInfo `json:"files,omitempty"`
+	}
 )
 
 func UploadRagFile(c *gin.Context) {
@@ -43,5 +47,27 @@ func UploadRagFile(c *gin.Context) {
 
 	res.Success()
 	res.FilePath = filePath
+	c.JSON(http.StatusOK, res)
+}
+
+func ListRagFiles(c *gin.Context) {
+	res := new(ListFileResponse)
+	items, err := file.ListRagFiles(c.GetString("userName"))
+	if err != nil {
+		c.JSON(http.StatusOK, res.CodeOf(code.CodeServerBusy))
+		return
+	}
+	res.Success()
+	res.Files = items
+	c.JSON(http.StatusOK, res)
+}
+
+func DeleteRagFile(c *gin.Context) {
+	res := new(controller.Response)
+	if err := file.DeleteRagFile(c.GetString("userName"), c.Param("name")); err != nil {
+		c.JSON(http.StatusOK, res.CodeOf(code.CodeServerBusy))
+		return
+	}
+	res.Success()
 	c.JSON(http.StatusOK, res)
 }

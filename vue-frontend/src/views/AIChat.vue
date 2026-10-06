@@ -29,6 +29,14 @@
           <option value="2">阿里百炼 RAG</option>
           <option value="3">阿里百炼 MCP</option>
         </select>
+        <label v-if="tempSession && mcpServers.length" for="mcpServers" class="capability-label">MCP 服务：</label>
+        <select v-if="tempSession && mcpServers.length" id="mcpServers" v-model="selectedMcpServerIds" multiple class="capability-select" @change="handleMcpSelectionChange">
+          <option v-for="server in mcpServers" :key="server.id" :value="server.id">{{ server.name }}</option>
+        </select>
+        <label v-if="tempSession && availableMcpTools.length" for="mcpTools" class="capability-label">工具：</label>
+        <select v-if="tempSession && availableMcpTools.length" id="mcpTools" v-model="selectedMcpToolIds" multiple class="capability-select">
+          <option v-for="tool in availableMcpTools" :key="tool.id" :value="tool.id">{{ tool.name }}</option>
+        </select>
         <label for="streamingMode" style="margin-left: 20px;">
           <input type="checkbox" id="streamingMode" v-model="isStreaming" />
           流式响应
@@ -100,6 +108,10 @@ export default {
     const messagesRef = ref(null)
     const messageInput = ref(null)
     const selectedModel = ref('1')
+    const mcpServers = ref([])
+    const selectedMcpServerIds = ref([])
+    const selectedMcpToolIds = ref([])
+    const availableMcpTools = computed(() => mcpServers.value.filter(server => selectedMcpServerIds.value.includes(server.id)).flatMap(server => server.tools || []))
     const isStreaming = ref(false)
     const uploading = ref(false)
     const fileInput = ref(null)
@@ -198,9 +210,28 @@ export default {
       }
     }
 
+    const loadMcpServers = async () => {
+      try {
+        const response = await api.get('/settings/mcp-servers')
+        if (response.data?.status_code === 1000) mcpServers.value = response.data.servers || []
+      } catch (error) {
+        console.error('Load MCP servers error:', error)
+      }
+    }
+
+    const handleMcpSelectionChange = () => {
+      const availableIds = new Set(availableMcpTools.value.map(tool => tool.id))
+      selectedMcpToolIds.value = selectedMcpToolIds.value.filter(id => availableIds.has(id))
+      if (selectedMcpServerIds.value.length) selectedModel.value = '3'
+      else if (selectedModel.value === '3') selectedModel.value = '1'
+    }
+
     const createNewSession = () => {
       currentSessionId.value = 'temp'
       tempSession.value = true
+      selectedMcpServerIds.value = []
+      selectedMcpToolIds.value = []
+      if (selectedModel.value === '3') selectedModel.value = '1'
       currentMessages.value = []
       // focus input
       nextTick(() => {
@@ -212,6 +243,8 @@ export default {
       if (!sessionId) return
       currentSessionId.value = String(sessionId)
       tempSession.value = false
+      selectedMcpServerIds.value = []
+      selectedMcpToolIds.value = []
 
       // lazy load history if not present
       if (!sessions.value[sessionId].messages || sessions.value[sessionId].messages.length === 0) {
@@ -336,7 +369,7 @@ export default {
       }
 
       const body = tempSession.value
-        ? { question: question, modelType: selectedModel.value }
+        ? { question: question, modelType: selectedModel.value, mcpServerIds: selectedMcpServerIds.value, mcpToolIds: selectedMcpToolIds.value }
         : { question: question, modelType: selectedModel.value, sessionId: currentSessionId.value }
 
       try {
@@ -458,7 +491,9 @@ export default {
 
         const response = await api.post('/AI/chat/send-new-session', {
           question: question,
-          modelType: selectedModel.value
+          modelType: selectedModel.value,
+          mcpServerIds: selectedMcpServerIds.value,
+          mcpToolIds: selectedMcpToolIds.value
         })
         if (response.data && response.data.status_code === 1000) {
           const sessionId = String(response.data.sessionId)
@@ -489,7 +524,9 @@ export default {
         const response = await api.post('/AI/chat/send', {
           question: question,
           modelType: selectedModel.value,
-          sessionId: currentSessionId.value
+          sessionId: currentSessionId.value,
+          mcpServerIds: selectedMcpServerIds.value,
+          mcpToolIds: selectedMcpToolIds.value
         })
         if (response.data && response.data.status_code === 1000) {
           const aiMessage = { role: 'assistant', content: response.data.Information || '' }
@@ -565,6 +602,7 @@ export default {
 
     onMounted(() => {
       loadSessions()
+      loadMcpServers()
     })
 
     // expose to template
@@ -578,6 +616,11 @@ export default {
       messagesRef,
       messageInput,
       selectedModel,
+      mcpServers,
+      selectedMcpServerIds,
+      selectedMcpToolIds,
+      availableMcpTools,
+      handleMcpSelectionChange,
       isStreaming,
       uploading,
       fileInput,
@@ -784,6 +827,24 @@ export default {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+}
+
+.capability-label {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.capability-select {
+  min-width: 140px;
+  max-width: 190px;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: #fff;
+  color: #2c3e50;
 }
 
 .upload-btn {

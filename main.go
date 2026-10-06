@@ -32,7 +32,7 @@ func readDataFromDB() error {
 		m := &msgs[i]
 		//默认openai模型
 		modelType := "1"
-		config := make(map[string]interface{})
+		config := map[string]interface{}{"username": m.UserName}
 
 		// 创建对应的 AIHelper
 		helper, err := manager.GetOrCreateAIHelper(m.UserName, m.SessionID, modelType, config)

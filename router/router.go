@@ -32,5 +32,10 @@ func InitRouter() *gin.Engine {
 		FileRouter(FileGroup)
 	}
 
+	ProviderGroup := enterRouter.Group("/settings")
+	ProviderGroup.Use(jwt.Auth())
+	ProviderRouter(ProviderGroup)
+	MCPRouter(ProviderGroup)
+
 	return r
 }

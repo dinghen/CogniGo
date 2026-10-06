@@ -34,6 +34,9 @@ func GetGlobalFactory() *AIModelFactory {
 func (f *AIModelFactory) registerCreators() {
 	//OpenAI
 	f.creators["1"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
+		if username, ok := config["username"].(string); ok && username != "" {
+			return NewOpenAIModelForUser(ctx, username)
+		}
 		return NewOpenAIModel(ctx)
 	}
 
@@ -52,7 +55,14 @@ func (f *AIModelFactory) registerCreators() {
 		if !ok {
 			return nil, fmt.Errorf("MCP model requires username")
 		}
-		return NewMCPModel(ctx, username)
+		var serverIDs, toolIDs []uint64
+		if values, ok := config["mcpServerIDs"].([]uint64); ok {
+			serverIDs = values
+		}
+		if values, ok := config["mcpToolIDs"].([]uint64); ok {
+			toolIDs = values
+		}
+		return NewMCPModelWithSelections(ctx, username, serverIDs, toolIDs)
 	}
 
 	//Ollama（目前提供接口实现，暂不提供应用，因为考虑到本地模型会占用很多空间）todo做
