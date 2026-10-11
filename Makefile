@@ -12,7 +12,7 @@ MCP_BIN ?= common/mcp/bin/cognigo-mcp
 PORT ?= 9090
 MCP_ADDR ?= :8081
 
-.PHONY: setup doctor test vet build build-mcp models run run-mcp frontend-install frontend-dev frontend-build infra-up infra-down clean
+.PHONY: setup doctor test vet build build-mcp models run run-mcp frontend-install frontend-dev frontend-build infra-up infra-down demo-start demo-stop demo-status demo-logs clean
 
 setup:
 	@mkdir -p "$(GOCACHE)" "$(GOMODCACHE)" "$(GOPATH)" bin common/mcp/bin
@@ -58,6 +58,18 @@ infra-up:
 
 infra-down:
 	docker compose down
+
+demo-start:
+	sh scripts/demo.sh start
+
+demo-stop:
+	sh scripts/demo.sh stop
+
+demo-status:
+	sh scripts/demo.sh status
+
+demo-logs:
+	sh scripts/demo.sh logs
 
 clean:
 	@for directory in bin common/mcp/bin vue-frontend/dist; do \

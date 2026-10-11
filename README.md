@@ -64,11 +64,33 @@ make frontend-dev
 
 ## 本地演示
 
+推荐使用一键演示脚本启动完整本地环境：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少填写 OPENAI_API_KEY 和 COGNIGO_PROVIDER_ENCRYPTION_KEY
+./scripts/demo.sh start
+./scripts/demo.sh status
+```
+
+脚本会启动 Docker Compose 基础设施、API、MCP Server 和 Vue 前端，并等待服务就绪。演示结束后执行：
+
+```bash
+./scripts/demo.sh logs
+./scripts/demo.sh stop
+```
+
+也可以使用等价的 Makefile 入口：`make demo-start`、`make demo-status`、`make demo-logs` 和 `make demo-stop`。如果提示端口已被占用，脚本不会停止未知进程；请先查看 `./scripts/demo.sh status`，再在 `.env` 中调整 `COGNIGO_PORT`、`COGNIGO_FRONTEND_PORT`、`COGNIGO_MCP_PORT` 或 Compose 对应的 `COGNIGO_*_PORT`。
+
+启动成功后：
+
 1. 打开前端，进入注册页，填写邮箱和密码。
 2. 打开 Mailpit，读取验证码并完成注册。注册邮件和后续账号邮件都会出现在本地 Mailpit，不需要真实邮箱。
 3. 登录后进入“配置中心”，添加聊天模型或 Embedding 连接；连接测试成功后再上传知识文件。
 4. 在配置中心添加 MCP 服务并执行“测试并发现工具”。HTTP 服务填写 `url` 和可选 headers；stdio 需要部署端显式设置 `COGNIGO_MCP_ALLOW_STDIO=true`，并将命令加入 `COGNIGO_MCP_STDIO_COMMANDS` 白名单。
 5. 回到聊天工作区创建新会话，按需选择 MCP 服务和工具。普通会话不创建 MCP Client；选择 MCP 后才会把允许的工具交给模型。
+
+MCP 地址是协议端点，不是网页页面；浏览器直接访问 `/mcp` 得到 `400` 或要求会话头属于正常行为。
 
 切换 Embedding 模型时，确认新的服务提供兼容的 Embeddings API。应用会探测实际维度并生成新的 Redis 索引代际，必要时在配置中心执行索引重建；不要手动填写 Redis 向量维度。
 
@@ -80,6 +102,7 @@ make frontend-dev
 | --- | --- |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL_NAME` | 默认聊天模型连接 |
 | `COGNIGO_PROVIDER_ENCRYPTION_KEY` | 32 字节密钥，用于加密用户 Provider 和 MCP secrets |
+| `COGNIGO_PORT` / `COGNIGO_FRONTEND_PORT` / `COGNIGO_MCP_PORT` | 演示脚本使用的 API、前端和 MCP 端口 |
 | `COGNIGO_RAG_BASE_URL` / `COGNIGO_EMBEDDING_MODEL` | 默认 RAG Embedding 服务 |
 | `COGNIGO_RAG_CHUNK_SIZE` / `COGNIGO_RAG_CHUNK_OVERLAP` | RAG 字符切片上限和重叠，默认 1000/150 |
 | `COGNIGO_RAG_TOP_K` / `COGNIGO_RAG_DISTANCE_THRESHOLD` | 召回数量和相似度过滤 |
@@ -106,11 +129,8 @@ go test ./...
 go vet ./...
 ```
 
-这些命令验证编译、单元测试、MCP 官方 SDK 适配、RAG 基础测试和前端生产构建，不代表已经完成生产压测或第三方检索基准评测。
-
 ## 安全与边界
 
 - 用户、Provider、知识文件、MCP Server 和 MCP Tool 都按账号隔离；服务层会再次校验所有权。
 - MCP HTTP 连接默认拒绝 loopback、私网和 link-local 目标，并限制跨源重定向；stdio 不接受 shell 拼接命令。
 - 上传文件、模型、ONNX Runtime、`node_modules`、`dist`、二进制和本地 `.env` 都属于运行时数据，不应提交到 Git。
-- 当前 RAG 是可运行 MVP，后续可以在独立任务中增加混合检索、重排、父子块和离线评测，不把未经测量的指标写成项目成果。
