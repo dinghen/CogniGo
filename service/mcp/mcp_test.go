@@ -1,10 +1,39 @@
 package mcp
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/dinghen/CogniGo/model"
 )
+
+func TestInputNormalizesCanonicalAndWrappedMaps(t *testing.T) {
+	var input Input
+	if err := json.Unmarshal([]byte(`{"name":"demo","transport":"streamable-http","url":"https://example.com/mcp","headers":{"headers":{"Authorization":"Bearer token"}},"env":{"env":{"TOKEN":"value"}}}`), &input); err != nil {
+		t.Fatalf("wrapped maps should normalize: %v", err)
+	}
+	if input.Headers["Authorization"] != "Bearer token" || input.Env["TOKEN"] != "value" {
+		t.Fatalf("unexpected normalized maps: %#v %#v", input.Headers, input.Env)
+	}
+}
+
+func TestInputRejectsNonStringMapValues(t *testing.T) {
+	var input Input
+	err := json.Unmarshal([]byte(`{"name":"demo","transport":"streamable-http","url":"https://example.com/mcp","headers":{"Authorization":true}}`), &input)
+	if !errors.Is(err, ErrInvalidHeaders) || err.Error() == ErrInvalidHeaders.Error() {
+		t.Fatalf("expected actionable headers error, got %v", err)
+	}
+	var env Input
+	err = json.Unmarshal([]byte(`{"name":"demo","transport":"stdio","command":"node","env":{"TOKEN":["value"]}}`), &env)
+	if !errors.Is(err, ErrInvalidEnv) || err.Error() == ErrInvalidEnv.Error() {
+		t.Fatalf("expected actionable env error, got %v", err)
+	}
+	err = json.Unmarshal([]byte(`{"name":"demo","transport":"stdio","command":"node","env":null}`), &env)
+	if !errors.Is(err, ErrInvalidEnv) {
+		t.Fatalf("null env should be rejected as a non-object, got %v", err)
+	}
+}
 
 func TestValidateTransportAndSSRF(t *testing.T) {
 	base := Input{Name: "demo", Transport: "streamable-http", URL: "https://example.com/mcp"}

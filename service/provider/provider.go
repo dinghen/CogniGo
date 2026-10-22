@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,7 @@ import (
 var (
 	ErrInvalidKind       = errors.New("provider kind must be chat or embedding")
 	ErrInvalidInput      = errors.New("provider input is invalid")
-	ErrEncryptionKey     = errors.New("COGNIGO_PROVIDER_ENCRYPTION_KEY must be a base64-encoded or 32-byte key")
+	ErrEncryptionKey     = errors.New("COGNIGO_PROVIDER_ENCRYPTION_KEY must be a raw 32-byte, base64-encoded 32-byte, or 64-character hexadecimal key")
 	ErrSecretUnavailable = errors.New("provider API key is unavailable")
 )
 
@@ -40,6 +41,13 @@ type ResolvedConfig struct {
 	APIKey    string
 	Dimension int
 	FromUser  bool
+}
+
+// ResolvedProviders contains only explicitly selected capabilities. Nil fields
+// preserve the deployment fallback used by legacy requests.
+type ResolvedProviders struct {
+	Chat      *ResolvedConfig
+	Embedding *ResolvedConfig
 }
 
 type ProviderDTO struct {
@@ -72,7 +80,15 @@ func masterKey() ([]byte, error) {
 	if raw == "" {
 		return nil, ErrEncryptionKey
 	}
+	if len(raw) == 64 {
+		if decoded, err := hex.DecodeString(raw); err == nil && len(decoded) == 32 {
+			return decoded, nil
+		}
+	}
 	if decoded, err := base64.StdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
+		return decoded, nil
+	}
+	if decoded, err := base64.RawStdEncoding.DecodeString(raw); err == nil && len(decoded) == 32 {
 		return decoded, nil
 	}
 	if len(raw) == 32 {
@@ -283,6 +299,9 @@ func Get(username string, id uint64) (ProviderDTO, error) {
 }
 
 func ResolveByID(username string, id uint64) (ResolvedConfig, error) {
+	if id == 0 {
+		return ResolvedConfig{}, providerDAO.ErrNotFound
+	}
 	uid, err := userID(username)
 	if err != nil {
 		return ResolvedConfig{}, err
@@ -298,6 +317,40 @@ func ResolveByID(username string, id uint64) (ResolvedConfig, error) {
 	return ResolvedConfig{Name: record.Name, Kind: record.Kind, Protocol: record.Protocol, BaseURL: record.BaseURL, Model: record.Model, APIKey: secret, Dimension: record.EmbeddingDimension, FromUser: true}, nil
 }
 
+// ResolveSelected resolves an explicitly selected provider and never falls
+// back when the selection is present.
+func ResolveSelected(username, kind string, id *uint64) (*ResolvedConfig, error) {
+	if id == nil {
+		return nil, nil
+	}
+	if *id == 0 {
+		return nil, providerDAO.ErrNotFound
+	}
+	resolved, err := ResolveByID(username, *id)
+	if err != nil {
+		return nil, err
+	}
+	if resolved.Kind != normalizeKind(kind) {
+		return nil, ErrInvalidKind
+	}
+	return &resolved, nil
+}
+
+// ResolveSelectedProviders validates explicit chat and embedding selections at
+// the session boundary. Unselected capabilities remain nil for deployment
+// fallback resolution by the model factory.
+func ResolveSelectedProviders(username string, chatID, embeddingID *uint64) (ResolvedProviders, error) {
+	chat, err := ResolveSelected(username, "chat", chatID)
+	if err != nil {
+		return ResolvedProviders{}, err
+	}
+	embedding, err := ResolveSelected(username, "embedding", embeddingID)
+	if err != nil {
+		return ResolvedProviders{}, err
+	}
+	return ResolvedProviders{Chat: chat, Embedding: embedding}, nil
+}
+
 func TestChat(ctx context.Context, cfg ResolvedConfig) error {
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{BaseURL: cfg.BaseURL, Model: cfg.Model, APIKey: cfg.APIKey})
 	if err != nil {
@@ -310,6 +363,7 @@ func TestChat(ctx context.Context, cfg ResolvedConfig) error {
 }
 
 func Resolve(username, kind string) (ResolvedConfig, error) {
+	kind = normalizeKind(kind)
 	uid, err := userID(username)
 	if err == nil {
 		record, getErr := providerDAO.GetDefault(uid, normalizeKind(kind))

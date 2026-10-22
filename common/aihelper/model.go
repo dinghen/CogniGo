@@ -2,6 +2,7 @@ package aihelper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -48,6 +49,12 @@ func NewOpenAIModelForUser(ctx context.Context, username string) (*OpenAIModel, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve chat provider: %w", err)
 	}
+	return newOpenAIModel(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
+}
+
+// NewOpenAIModelForProvider constructs a chat model from a provider already
+// resolved by the authenticated session boundary.
+func NewOpenAIModelForProvider(ctx context.Context, resolved providerService.ResolvedConfig) (*OpenAIModel, error) {
 	return newOpenAIModel(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
 }
 
@@ -154,8 +161,9 @@ func (o *OllamaModel) GetModelType() string { return "4" }
 
 // =================== RAG 实现 ===================
 type AliRAGModel struct {
-	llm      model.ToolCallingChatModel
-	username string // 用于获取用户的文档
+	llm       model.ToolCallingChatModel
+	username  string // 用于获取用户的文档
+	embedding providerService.ResolvedConfig
 }
 
 func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) {
@@ -168,22 +176,52 @@ func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) 
 		resolved.BaseURL = conf.RagModelConfig.RagBaseUrl
 		resolved.Model = conf.RagModelConfig.RagChatModelName
 	}
-	return newAliRAGModel(ctx, username, resolved.BaseURL, resolved.Model, resolved.APIKey)
+	embedding, err := providerService.Resolve(username, "embedding")
+	if err != nil {
+		return nil, fmt.Errorf("resolve embedding provider: %w", err)
+	}
+	return newAliRAGModel(ctx, username, resolved, embedding)
 }
 
-func newAliRAGModel(ctx context.Context, username, baseURL, modelName, key string) (*AliRAGModel, error) {
+// NewAliRAGModelForProviders threads independently selected chat and embedding
+// capabilities through the RAG model. Nil values retain deployment fallback.
+func NewAliRAGModelForProviders(ctx context.Context, username string, chat, embedding *providerService.ResolvedConfig) (*AliRAGModel, error) {
+	if chat == nil {
+		resolved, err := providerService.Resolve(username, "chat")
+		if err != nil {
+			return nil, fmt.Errorf("resolve chat provider: %w", err)
+		}
+		chat = &resolved
+		if !chat.FromUser {
+			conf := config.GetConfig()
+			chat.BaseURL = conf.RagModelConfig.RagBaseUrl
+			chat.Model = conf.RagModelConfig.RagChatModelName
+		}
+	}
+	if embedding == nil {
+		resolved, err := providerService.Resolve(username, "embedding")
+		if err != nil {
+			return nil, fmt.Errorf("resolve embedding provider: %w", err)
+		}
+		embedding = &resolved
+	}
+	return newAliRAGModel(ctx, username, *chat, *embedding)
+}
+
+func newAliRAGModel(ctx context.Context, username string, chat, embedding providerService.ResolvedConfig) (*AliRAGModel, error) {
 
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL: baseURL,
-		Model:   modelName,
-		APIKey:  key,
+		BaseURL: chat.BaseURL,
+		Model:   chat.Model,
+		APIKey:  chat.APIKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create ali rag model failed: %w", err)
 	}
 	return &AliRAGModel{
-		llm:      llm,
-		username: username,
+		llm:       llm,
+		username:  username,
+		embedding: embedding,
 	}, nil
 }
 
@@ -194,8 +232,14 @@ func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.M
 	query := messages[len(messages)-1].Content
 
 	// 1. 创建 RAG 查询器
-	ragQuery, err := rag.NewRAGQuery(ctx, o.username)
+	ragQuery, err := rag.NewRAGQueryForProvider(ctx, o.username, o.embedding)
 	if err != nil {
+		if errors.Is(err, rag.ErrNoKnowledgeFiles) {
+			return o.llm.Generate(ctx, messages)
+		}
+		if errors.Is(err, rag.ErrIndexRebuildRequired) {
+			return nil, err
+		}
 		log.Printf("Failed to create RAG query (user may not have uploaded file): %v", err)
 		resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, nil))
 		if err != nil {
@@ -230,8 +274,14 @@ func (o *AliRAGModel) StreamResponse(ctx context.Context, messages []*schema.Mes
 	query := messages[len(messages)-1].Content
 
 	// 1. 创建 RAG 查询器
-	ragQuery, err := rag.NewRAGQuery(ctx, o.username)
+	ragQuery, err := rag.NewRAGQueryForProvider(ctx, o.username, o.embedding)
 	if err != nil {
+		if errors.Is(err, rag.ErrNoKnowledgeFiles) {
+			return o.streamMessages(ctx, messages, cb)
+		}
+		if errors.Is(err, rag.ErrIndexRebuildRequired) {
+			return "", err
+		}
 		log.Printf("Failed to create RAG query (user may not have uploaded file): %v", err)
 		return o.streamWithRAGPrompt(ctx, messages, query, nil, cb)
 	}
@@ -254,7 +304,11 @@ func withRAGPrompt(messages []*schema.Message, query string, docs []*schema.Docu
 }
 
 func (o *AliRAGModel) streamWithRAGPrompt(ctx context.Context, messages []*schema.Message, query string, docs []*schema.Document, cb StreamCallback) (string, error) {
-	stream, err := o.llm.Stream(ctx, withRAGPrompt(messages, query, docs))
+	return o.streamMessages(ctx, withRAGPrompt(messages, query, docs), cb)
+}
+
+func (o *AliRAGModel) streamMessages(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
+	stream, err := o.llm.Stream(ctx, messages)
 	if err != nil {
 		return "", fmt.Errorf("ali rag stream failed: %w", err)
 	}
@@ -288,9 +342,12 @@ func (o *AliRAGModel) GetModelType() string { return "2" }
 // MCPModel MCP模型实现，集成MCP服务
 type MCPModel struct {
 	llm           model.ToolCallingChatModel
+	username      string
+	embedding     *providerService.ResolvedConfig
 	mcpClients    []*mcpclient.MCPClient
 	mcpBaseURL    string
 	mcpSelections []mcpService.RuntimeSelection
+	modelType     string
 	mu            sync.Mutex
 }
 
@@ -305,11 +362,39 @@ func NewMCPModelWithSelections(ctx context.Context, username string, serverIDs, 
 		return nil, fmt.Errorf("resolve chat provider for mcp: %w", err)
 	}
 
+	return newMCPModelWithProvider(ctx, username, resolved, serverIDs, toolIDs)
+}
+
+// NewMCPModelWithProvider uses the selected chat provider while retaining the
+// existing ownership-checked MCP selection flow.
+func NewMCPModelWithProvider(ctx context.Context, username string, resolved providerService.ResolvedConfig, serverIDs, toolIDs []uint64) (*MCPModel, error) {
+	return newMCPModelWithProviders(ctx, username, &resolved, nil, serverIDs, toolIDs)
+}
+
+func newMCPModelWithProvider(ctx context.Context, username string, resolved providerService.ResolvedConfig, serverIDs, toolIDs []uint64) (*MCPModel, error) {
+	return newMCPModelWithProviders(ctx, username, &resolved, nil, serverIDs, toolIDs)
+}
+
+// NewMCPModelWithProviders creates the unified tool-calling runtime. A
+// selected embedding provider adds the user's RAG context before the native
+// MCP agent runs; a nil embedding provider leaves ordinary tool chat intact.
+func NewMCPModelWithProviders(ctx context.Context, username string, chat, embedding *providerService.ResolvedConfig, serverIDs, toolIDs []uint64) (*MCPModel, error) {
+	if chat == nil {
+		resolved, err := providerService.Resolve(username, "chat")
+		if err != nil {
+			return nil, fmt.Errorf("resolve chat provider for capability model: %w", err)
+		}
+		chat = &resolved
+	}
+	return newMCPModelWithProviders(ctx, username, chat, embedding, serverIDs, toolIDs)
+}
+
+func newMCPModelWithProviders(ctx context.Context, username string, chat, embedding *providerService.ResolvedConfig, serverIDs, toolIDs []uint64) (*MCPModel, error) {
 	// 创建LLM
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL: resolved.BaseURL,
-		Model:   resolved.Model,
-		APIKey:  resolved.APIKey,
+		BaseURL: chat.BaseURL,
+		Model:   chat.Model,
+		APIKey:  chat.APIKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create mcp model failed: %w", err)
@@ -324,7 +409,25 @@ func NewMCPModelWithSelections(ctx context.Context, username string, serverIDs, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve MCP session selection: %w", err)
 	}
-	return &MCPModel{llm: llm, mcpBaseURL: mcpBaseURL, mcpSelections: selections}, nil
+	return &MCPModel{llm: llm, username: username, embedding: embedding, mcpBaseURL: mcpBaseURL, mcpSelections: selections, modelType: "3"}, nil
+}
+
+// NewCapabilityModel is the unified runtime used by the new chat workspace.
+// It combines the selected knowledge retriever with zero or more MCP tools.
+func NewCapabilityModel(ctx context.Context, username string, chat, embedding *providerService.ResolvedConfig, serverIDs, toolIDs []uint64) (*MCPModel, error) {
+	if chat == nil {
+		resolved, err := providerService.Resolve(username, "chat")
+		if err != nil {
+			return nil, fmt.Errorf("resolve chat provider for capability model: %w", err)
+		}
+		chat = &resolved
+	}
+	capabilityModel, err := newMCPModelWithProviders(ctx, username, chat, embedding, serverIDs, toolIDs)
+	if err != nil {
+		return nil, err
+	}
+	capabilityModel.modelType = "capability"
+	return capabilityModel, nil
 }
 
 func (m *MCPModel) getMCPClients(ctx context.Context) ([]*mcpclient.MCPClient, error) {
@@ -352,6 +455,9 @@ func (m *MCPModel) getMCPClients(ctx context.Context) ([]*mcpclient.MCPClient, e
 }
 
 func (m *MCPModel) einoTools(ctx context.Context) ([]tool.BaseTool, error) {
+	if len(m.mcpSelections) == 0 {
+		return nil, nil
+	}
 	clients, err := m.getMCPClients(ctx)
 	if err != nil {
 		return nil, err
@@ -376,9 +482,16 @@ func (m *MCPModel) GenerateResponse(ctx context.Context, messages []*schema.Mess
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages provided")
 	}
+	messages, err := m.withRAGContext(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
 	tools, err := m.einoTools(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if len(tools) == 0 {
+		return m.llm.Generate(ctx, messages)
 	}
 	mcpAgent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: m.llm,
@@ -396,9 +509,37 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 	if len(messages) == 0 {
 		return "", fmt.Errorf("no messages provided")
 	}
+	messages, err := m.withRAGContext(ctx, messages)
+	if err != nil {
+		return "", err
+	}
 	tools, err := m.einoTools(ctx)
 	if err != nil {
 		return "", err
+	}
+	if len(tools) == 0 {
+		stream, err := m.llm.Stream(ctx, messages)
+		if err != nil {
+			return "", fmt.Errorf("capability stream failed: %w", err)
+		}
+		defer stream.Close()
+		var response strings.Builder
+		for {
+			msg, recvErr := stream.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				return "", fmt.Errorf("receive capability stream: %w", recvErr)
+			}
+			if msg != nil && msg.Content != "" {
+				response.WriteString(msg.Content)
+				if cb != nil {
+					cb(msg.Content)
+				}
+			}
+		}
+		return response.String(), nil
 	}
 	mcpAgent, err := react.NewAgent(ctx, &react.AgentConfig{
 		ToolCallingModel: m.llm,
@@ -432,6 +573,28 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 	return response.String(), nil
 }
 
+func (m *MCPModel) withRAGContext(ctx context.Context, messages []*schema.Message) ([]*schema.Message, error) {
+	if m.embedding == nil || len(messages) == 0 {
+		return messages, nil
+	}
+	query := messages[len(messages)-1].Content
+	queryEngine, err := rag.NewRAGQueryForProvider(ctx, m.username, *m.embedding)
+	if err != nil {
+		if errors.Is(err, rag.ErrNoKnowledgeFiles) {
+			return messages, nil
+		}
+		return nil, fmt.Errorf("prepare knowledge retrieval: %w", err)
+	}
+	docs, err := queryEngine.RetrieveDocuments(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve knowledge context: %w", err)
+	}
+	withContext := make([]*schema.Message, len(messages))
+	copy(withContext, messages)
+	withContext[len(withContext)-1] = &schema.Message{Role: schema.User, Content: rag.BuildRAGPrompt(query, docs)}
+	return withContext, nil
+}
+
 func (m *MCPModel) maxSteps() int {
 	steps := config.GetConfig().RuntimeConfig.MCPMaxSteps
 	if steps <= 0 {
@@ -444,7 +607,12 @@ func (m *MCPModel) maxSteps() int {
 }
 
 // GetModelType returns the MCP model identifier.
-func (m *MCPModel) GetModelType() string { return "3" }
+func (m *MCPModel) GetModelType() string {
+	if m.modelType != "" {
+		return m.modelType
+	}
+	return "3"
+}
 
 // Close closes the official MCP session.
 func (m *MCPModel) Close() {

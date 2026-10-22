@@ -4,9 +4,10 @@ set -eu
 ROOT_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd)
 RUNTIME_DIR=${COGNIGO_DEMO_RUNTIME_DIR:-"$ROOT_DIR/.local/demo"}
 ENV_FILE=${DEMO_ENV_FILE:-"$ROOT_DIR/.env"}
-WAIT_SECONDS=${COGNIGO_DEMO_WAIT_SECONDS:-60}
+WAIT_SECONDS=${COGNIGO_DEMO_WAIT_SECONDS:-180}
 PROJECT_SUFFIX=$(printf '%s' "$ROOT_DIR" | cksum | awk '{print $1}')
 COMPOSE_PROJECT_NAME="cognigo-demo-$PROJECT_SUFFIX"
+DOCKER_BIN=${COGNIGO_DOCKER_BIN:-}
 
 API_PID_FILE="$RUNTIME_DIR/api.pid"
 MCP_PID_FILE="$RUNTIME_DIR/mcp.pid"
@@ -18,14 +19,14 @@ FRONTEND_LOG="$RUNTIME_DIR/frontend.log"
 API_PORT=${COGNIGO_PORT:-9090}
 MCP_PORT=${COGNIGO_MCP_PORT:-8081}
 FRONTEND_PORT=${COGNIGO_FRONTEND_PORT:-8080}
-MAILPIT_WEB_PORT=8025
+MAILPIT_WEB_PORT=${COGNIGO_MAILPIT_WEB_PORT:-8025}
 
 usage() {
   cat <<'EOF'
-Usage: scripts/demo.sh <command>
+Usage: scripts/demo.sh [command]
 
 Commands:
-  start   Start Compose dependencies, API, MCP, and the frontend
+  start   Start Compose dependencies, API, MCP, and the frontend (default)
   stop    Stop services started by this script and this repository's Compose project
   status  Show service, process, and endpoint status
   logs    Show logs; use "logs -f [api|mcp|frontend]" to follow one service
@@ -58,6 +59,8 @@ load_env() {
   API_PORT=${COGNIGO_PORT:-9090}
   MCP_PORT=${COGNIGO_MCP_PORT:-8081}
   FRONTEND_PORT=${COGNIGO_FRONTEND_PORT:-8080}
+  MAILPIT_WEB_PORT=${COGNIGO_MAILPIT_WEB_PORT:-8025}
+  WAIT_SECONDS=${COGNIGO_DEMO_WAIT_SECONDS:-180}
 }
 
 load_env_optional() {
@@ -69,7 +72,28 @@ load_env_optional() {
 }
 
 compose() {
-  COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" docker compose "$@"
+  (cd "$ROOT_DIR" && docker_cmd compose --project-name "$COMPOSE_PROJECT_NAME" "$@")
+}
+
+resolve_docker() {
+  [ -n "$DOCKER_BIN" ] && return 0
+  if command -v docker >/dev/null 2>&1; then
+    DOCKER_BIN=$(command -v docker)
+  elif command -v docker.exe >/dev/null 2>&1; then
+    DOCKER_BIN=$(command -v docker.exe)
+  elif [ -x '/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe' ]; then
+    DOCKER_BIN='/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe'
+  else
+    return 1
+  fi
+}
+
+docker_cmd() {
+  "$DOCKER_BIN" "$@"
+}
+
+docker_available() {
+  resolve_docker && docker_cmd info >/dev/null 2>&1 && docker_cmd compose version >/dev/null 2>&1
 }
 
 require_command() {
@@ -77,25 +101,29 @@ require_command() {
 }
 
 check_prerequisites() {
-  require_command docker
   require_command go
   require_command node
   require_command npm
   require_command curl
-  docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
-  docker compose version >/dev/null 2>&1 || die "Docker Compose is unavailable"
+  resolve_docker || die "Docker CLI not found; install Docker or enable Docker Desktop WSL integration"
+  docker_cmd info >/dev/null 2>&1 || die "Docker daemon is unavailable; start Docker Desktop"
+  docker_cmd compose version >/dev/null 2>&1 || die "Docker Compose is unavailable"
   [ -f "$ROOT_DIR/config/config.toml" ] || die "missing config/config.toml"
 }
 
 port_in_use() {
   port=$1
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1 | grep -q .
-    return $?
+  case "$port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1 | grep -q .; then
+    return 0
   fi
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnH 2>/dev/null | awk -v port=":$port" 'index($4, port) == length($4) - length(port) + 1 {found=1} END {exit found ? 0 : 1}'
-    return $?
+  if command -v ss >/dev/null 2>&1 && ss -ltnH 2>/dev/null | awk -v port=":$port" 'index($4, port) == length($4) - length(port) + 1 {found=1} END {exit found ? 0 : 1}'; then
+    return 0
+  fi
+  if command -v bash >/dev/null 2>&1 && bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"' bash "$port" >/dev/null 2>&1; then
+    return 0
   fi
   return 1
 }
@@ -190,10 +218,26 @@ compose_service_ready() {
   service=$1
   container=$(compose ps -q "$service" 2>/dev/null | head -n 1)
   [ -n "$container" ] || return 1
-  state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)
+  state=$(docker_cmd inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)
   [ "$state" = running ] || return 1
-  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || true)
+  health=$(docker_cmd inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || true)
   [ "$health" = healthy ] || [ "$health" = none ]
+}
+
+ensure_compose_ports_free() {
+  for entry in \
+    "mysql:${COGNIGO_MYSQL_PORT:-3306}" \
+    "redis:${COGNIGO_REDIS_PORT:-6379}" \
+    "rabbitmq:${COGNIGO_RABBITMQ_PORT:-5672}" \
+    "rabbitmq:${COGNIGO_RABBITMQ_MANAGEMENT_PORT:-15672}" \
+    "mailpit:${COGNIGO_SMTP_PORT:-1025}" \
+    "mailpit:$MAILPIT_WEB_PORT"; do
+    service=${entry%%:*}
+    port=${entry#*:}
+    if port_in_use "$port" && ! compose_service_ready "$service"; then
+      die "Compose host port $port for $service is already in use; set the matching COGNIGO_*_PORT in $ENV_FILE"
+    fi
+  done
 }
 
 wait_for_compose() {
@@ -230,7 +274,7 @@ endpoint_ready() {
 wait_for_apps() {
   deadline=$(( $(date +%s) + WAIT_SECONDS ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    endpoint_ready "http://127.0.0.1:$API_PORT/" 200 && \
+    endpoint_ready "http://127.0.0.1:$API_PORT/" 200,404 && \
       endpoint_ready "http://127.0.0.1:$FRONTEND_PORT/" 200 && \
       endpoint_ready "http://127.0.0.1:$MAILPIT_WEB_PORT/" 200 && \
       (endpoint_ready "http://127.0.0.1:$MCP_PORT/mcp" 200,400) && return 0
@@ -254,9 +298,15 @@ start_process() {
 
   say "starting $name"
   if command -v setsid >/dev/null 2>&1; then
-    setsid env COGNIGO_MCP_URL="http://127.0.0.1:$MCP_PORT/mcp" "$@" >"$log_file" 2>&1 &
+    # API and MCP load configuration from paths relative to the repository root.
+    # shellcheck disable=SC2016
+    setsid sh -c 'root=$1; mcp_url=$2; shift 2; cd "$root" && exec env COGNIGO_MCP_URL="$mcp_url" "$@"' \
+      sh "$ROOT_DIR" "http://127.0.0.1:$MCP_PORT/mcp" "$@" >"$log_file" 2>&1 &
   else
-    env COGNIGO_MCP_URL="http://127.0.0.1:$MCP_PORT/mcp" "$@" >"$log_file" 2>&1 &
+    (
+      cd "$ROOT_DIR"
+      exec env COGNIGO_MCP_URL="http://127.0.0.1:$MCP_PORT/mcp" "$@"
+    ) >"$log_file" 2>&1 &
   fi
   pid=$!
   printf '%s\n' "$pid" >"$pid_file"
@@ -297,6 +347,7 @@ start() {
   trap 'cleanup_started; exit 130' INT TERM HUP
   build_if_needed
   ensure_app_ports_free
+  ensure_compose_ports_free
   say "starting Compose dependencies"
   compose up -d mysql redis rabbitmq mailpit
   wait_for_compose
@@ -352,7 +403,7 @@ stop() {
   stop_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp"
   stop_process api "$API_PID_FILE" "bin/cognigo"
   load_env_optional
-  if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  if docker_available; then
     say "stopping this repository's Compose project"
     compose down
   else
@@ -388,7 +439,7 @@ status() {
   printf '  frontend HTTP: %s\n' "$(http_code "http://127.0.0.1:$FRONTEND_PORT/")"
   printf '  mcp HTTP:     %s (400 is expected for a browser GET)\n' "$(http_code "http://127.0.0.1:$MCP_PORT/mcp")"
   printf '  mailpit HTTP: %s\n' "$(http_code "http://127.0.0.1:$MAILPIT_WEB_PORT/")"
-  if docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  if docker_available; then
     compose ps || true
   else
     warn "Docker is unavailable; skipping Compose status"
@@ -426,8 +477,8 @@ logs() {
 }
 
 main() {
-  command=${1:-}
-  shift || true
+  command=${1:-start}
+  [ "$#" -eq 0 ] || shift
   case "$command" in
     start) [ "$#" -eq 0 ] || die "start does not accept arguments"; start ;;
     stop) [ "$#" -eq 0 ] || die "stop does not accept arguments"; stop ;;

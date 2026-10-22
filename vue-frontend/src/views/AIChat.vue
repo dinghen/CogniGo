@@ -23,20 +23,7 @@
       <div class="top-bar">
         <button class="back-btn" @click="$router.push('/menu')">← 返回</button>
         <button class="sync-btn" @click="syncHistory" :disabled="!currentSessionId || tempSession">同步历史数据</button>
-        <label for="modelType">选择模型：</label>
-        <select id="modelType" v-model="selectedModel" class="model-select">
-          <option value="1">阿里百炼</option>
-          <option value="2">阿里百炼 RAG</option>
-          <option value="3">阿里百炼 MCP</option>
-        </select>
-        <label v-if="tempSession && mcpServers.length" for="mcpServers" class="capability-label">MCP 服务：</label>
-        <select v-if="tempSession && mcpServers.length" id="mcpServers" v-model="selectedMcpServerIds" multiple class="capability-select" @change="handleMcpSelectionChange">
-          <option v-for="server in mcpServers" :key="server.id" :value="server.id">{{ server.name }}</option>
-        </select>
-        <label v-if="tempSession && availableMcpTools.length" for="mcpTools" class="capability-label">工具：</label>
-        <select v-if="tempSession && availableMcpTools.length" id="mcpTools" v-model="selectedMcpToolIds" multiple class="capability-select">
-          <option v-for="tool in availableMcpTools" :key="tool.id" :value="tool.id">{{ tool.name }}</option>
-        </select>
+        <button class="settings-btn" @click="$router.push('/settings')">配置能力</button>
         <label for="streamingMode" style="margin-left: 20px;">
           <input type="checkbox" id="streamingMode" v-model="isStreaming" />
           流式响应
@@ -50,6 +37,68 @@
           @change="handleFileUpload"
         />
       </div>
+
+      <section class="capability-panel" aria-label="聊天能力选择">
+        <div class="capability-field">
+          <label for="chatProvider">聊天模型</label>
+          <select id="chatProvider" v-model="selectedChatProviderId" class="capability-select" :disabled="!chatProviders.length" @change="rememberCurrentSessionCapabilities">
+            <option value="">使用默认连接</option>
+            <option v-for="provider in chatProviders" :key="provider.id" :value="String(provider.id)">
+              {{ provider.name }} · {{ provider.model }}{{ provider.status && provider.status !== 'ready' ? `（${provider.status}）` : '' }}
+            </option>
+          </select>
+          <small v-if="!chatProviders.length" class="capability-hint">还没有配置聊天模型，请先前往设置。</small>
+        </div>
+        <div class="capability-field">
+          <label for="embeddingProvider">知识检索模型</label>
+          <select id="embeddingProvider" v-model="selectedEmbeddingProviderId" class="capability-select" :disabled="!embeddingProviders.length" @change="rememberCurrentSessionCapabilities">
+            <option value="">使用默认 Embedding 连接</option>
+            <option v-for="provider in embeddingProviders" :key="provider.id" :value="String(provider.id)">
+              {{ provider.name }} · {{ provider.model }}{{ provider.status && provider.status !== 'ready' ? `（${provider.status}）` : '' }}
+            </option>
+          </select>
+          <small v-if="!embeddingProviders.length" class="capability-hint">没有配置 Embedding 模型时仍可进行普通对话。</small>
+        </div>
+        <div class="capability-field capability-field-wide">
+          <label for="mcpServers">MCP 服务</label>
+          <select id="mcpServers" v-model="selectedMcpServerIds" multiple class="capability-select" :disabled="!mcpServers.length" @change="handleMcpSelectionChange">
+            <option v-for="server in mcpServers" :key="server.id" :value="String(server.id)" :disabled="server.enabled === false">
+              {{ server.name }}{{ server.status && server.status !== 'healthy' ? `（${server.status}）` : '' }}
+            </option>
+          </select>
+          <small v-if="!mcpServers.length" class="capability-hint">还没有 MCP 服务；不选择服务时不会建立 MCP 连接。</small>
+          <small v-else-if="!selectedMcpServers.length" class="capability-hint">当前未选择 MCP 服务，本次请求不会连接 MCP。</small>
+        </div>
+        <div v-if="selectedMcpServers.length" class="capability-tools capability-field-wide">
+          <span class="capability-label">可用工具（未选择工具时包含所选服务的全部工具）</span>
+          <details v-for="server in selectedMcpServers" :key="server.id" open class="tool-group">
+            <summary>{{ server.name }}（{{ (server.tools || []).length }}）</summary>
+            <label v-for="tool in server.tools || []" :key="tool.id" class="tool-option">
+              <input v-model="selectedMcpToolIds" type="checkbox" :value="String(tool.id)" :disabled="tool.enabled === false" @change="rememberCurrentSessionCapabilities" />
+              <span>{{ tool.name }}</span>
+            </label>
+            <small v-if="!(server.tools || []).length" class="capability-hint">尚未发现工具，请在设置中测试并发现。</small>
+          </details>
+        </div>
+        <div class="knowledge-status" :class="{ 'knowledge-error': knowledgeError }">
+          <span v-if="loadingKnowledge">正在检查知识库状态…</span>
+          <span v-else-if="knowledgeError">{{ knowledgeError }} <button type="button" class="inline-action" @click="loadKnowledgeFiles">重新加载</button></span>
+          <span v-else-if="!knowledgeFiles.length">还没有知识文件，当前仍可进行普通对话。</span>
+          <span v-else-if="!readyKnowledgeFiles.length">知识库尚不可检索；{{ needsRebuildCount ? '请在设置中重建索引。' : '文件正在处理，完成后会自动用于检索。' }}当前仍可进行普通对话。</span>
+          <span v-else>知识库已就绪：{{ readyKnowledgeFiles.length }} 个文件可用于检索。<span v-if="needsRebuildCount">另有 {{ needsRebuildCount }} 个文件需要重建索引。</span></span>
+        </div>
+        <p v-if="selectedChatProvider && selectedChatProvider.status && selectedChatProvider.status !== 'ready'" class="capability-hint">
+          所选聊天模型状态为 {{ selectedChatProvider.status }}；请在设置中测试连接后重试。
+        </p>
+        <p v-if="selectedEmbeddingProvider && selectedEmbeddingProvider.status !== 'ready'" class="capability-hint">
+          所选检索模型状态为 {{ selectedEmbeddingProvider.status || '未验证' }}；如需使用知识检索，请在设置中测试连接并重建索引。
+        </p>
+        <p v-if="providerError || mcpError || uploadError" class="capability-error" role="alert">
+          {{ [providerError, mcpError, uploadError].filter(Boolean).join(' ') }}
+          <button type="button" class="inline-action" @click="refreshCapabilities">重新加载状态</button>
+        </p>
+        <p v-if="chatError" class="capability-error" role="alert">{{ chatError }}</p>
+      </section>
 
       <div class="chat-messages" ref="messagesRef">
         <div
@@ -107,11 +156,29 @@ export default {
     const loading = ref(false)
     const messagesRef = ref(null)
     const messageInput = ref(null)
-    const selectedModel = ref('1')
+    const providers = ref([])
+    const chatProviders = computed(() => providers.value.filter(provider => provider.kind === 'chat'))
+    const embeddingProviders = computed(() => providers.value.filter(provider => provider.kind === 'embedding'))
+    const selectedChatProviderId = ref('')
+    const selectedEmbeddingProviderId = ref('')
     const mcpServers = ref([])
+    const mcpServersLoaded = ref(false)
     const selectedMcpServerIds = ref([])
     const selectedMcpToolIds = ref([])
-    const availableMcpTools = computed(() => mcpServers.value.filter(server => selectedMcpServerIds.value.includes(server.id)).flatMap(server => server.tools || []))
+    const selectedMcpServers = computed(() => mcpServers.value.filter(server => server.enabled !== false && selectedMcpServerIds.value.includes(String(server.id))))
+    const knowledgeFiles = ref([])
+    const readyKnowledgeFiles = computed(() => knowledgeFiles.value.filter(file => file.status === 'ready'))
+    const needsRebuildCount = computed(() => knowledgeFiles.value.filter(file => ['stale', 'failed', 'rebuild_required'].includes(file.status)).length)
+    const selectedEmbeddingProvider = computed(() => embeddingProviders.value.find(provider => String(provider.id) === selectedEmbeddingProviderId.value))
+    const selectedChatProvider = computed(() => chatProviders.value.find(provider => String(provider.id) === selectedChatProviderId.value))
+    const providerError = ref('')
+    const mcpError = ref('')
+    const knowledgeError = ref('')
+    const chatError = ref('')
+    const uploadError = ref('')
+    const loadingKnowledge = ref(false)
+    const sessionCapabilities = ref({})
+    let providersInitialized = false
     const isStreaming = ref(false)
     const uploading = ref(false)
     const fileInput = ref(null)
@@ -190,6 +257,46 @@ export default {
       }
     }
 
+    const capabilitySnapshot = () => ({
+      chatProviderId: selectedChatProviderId.value,
+      embeddingProviderId: selectedEmbeddingProviderId.value,
+      mcpServerIds: [...selectedMcpServerIds.value],
+      mcpToolIds: [...selectedMcpToolIds.value]
+    })
+
+    const rememberCurrentSessionCapabilities = () => {
+      if (!tempSession.value && currentSessionId.value) {
+        sessionCapabilities.value[currentSessionId.value] = capabilitySnapshot()
+      }
+    }
+
+    const restoreSessionCapabilities = sessionId => {
+      const saved = sessionCapabilities.value[sessionId]
+      selectedChatProviderId.value = saved?.chatProviderId || ''
+      selectedEmbeddingProviderId.value = saved?.embeddingProviderId || ''
+      selectedMcpServerIds.value = [...(saved?.mcpServerIds || [])]
+      selectedMcpToolIds.value = [...(saved?.mcpToolIds || [])]
+      if (mcpServersLoaded.value) handleMcpSelectionChange()
+    }
+
+    const getCapabilityPayload = () => {
+      const payload = {}
+      if (!providerError.value) {
+        payload.chatProviderId = selectedChatProvider.value ? Number(selectedChatProvider.value.id) : 0
+        payload.embeddingProviderId = selectedEmbeddingProvider.value ? Number(selectedEmbeddingProvider.value.id) : 0
+      }
+      if (!mcpError.value && mcpServersLoaded.value) {
+        payload.mcpServerIds = selectedMcpServers.value.map(server => Number(server.id))
+        payload.mcpToolIds = selectedMcpToolIds.value.filter(id => selectedMcpServers.value.some(server => (server.tools || []).some(tool => String(tool.id) === id && tool.enabled !== false))).map(Number)
+      }
+      return payload
+    }
+
+    const errorMessage = (error, fallback) => {
+      const data = error?.response?.data
+      return data?.status_msg || data?.message || data?.error || (error?.message && error.message !== 'Failed to fetch' ? error.message : fallback)
+    }
+
     const loadSessions = async () => {
       try {
         const response = await api.get('/AI/chat/sessions')
@@ -202,6 +309,14 @@ export default {
               name: s.name || `会话 ${sid}`,
               messages: [] // lazy load
             }
+            if (Array.isArray(s.mcpServerIds) || s.chatProviderId || s.embeddingProviderId) {
+              sessionCapabilities.value[sid] = {
+                chatProviderId: s.chatProviderId ? String(s.chatProviderId) : '',
+                embeddingProviderId: s.embeddingProviderId ? String(s.embeddingProviderId) : '',
+                mcpServerIds: (s.mcpServerIds || []).map(String),
+                mcpToolIds: (s.mcpToolIds || []).map(String)
+              }
+            }
           })
           sessions.value = sessionMap
         }
@@ -210,28 +325,71 @@ export default {
       }
     }
 
-    const loadMcpServers = async () => {
+    const loadProviders = async () => {
       try {
-        const response = await api.get('/settings/mcp-servers')
-        if (response.data?.status_code === 1000) mcpServers.value = response.data.servers || []
+        const response = await api.get('/settings/providers')
+        if (response.data?.status_code !== 1000) throw new Error(response.data?.status_msg || '模型连接加载失败')
+        providers.value = response.data.providers || []
+        if (!providersInitialized) {
+          const defaultChat = chatProviders.value.find(provider => provider.is_default) || (chatProviders.value.length === 1 ? chatProviders.value[0] : null)
+          const defaultEmbedding = embeddingProviders.value.find(provider => provider.is_default) || (embeddingProviders.value.length === 1 ? embeddingProviders.value[0] : null)
+          selectedChatProviderId.value = defaultChat ? String(defaultChat.id) : ''
+          selectedEmbeddingProviderId.value = defaultEmbedding ? String(defaultEmbedding.id) : ''
+          providersInitialized = true
+        } else {
+          if (selectedChatProviderId.value && !chatProviders.value.some(provider => String(provider.id) === selectedChatProviderId.value)) selectedChatProviderId.value = ''
+          if (selectedEmbeddingProviderId.value && !embeddingProviders.value.some(provider => String(provider.id) === selectedEmbeddingProviderId.value)) selectedEmbeddingProviderId.value = ''
+        }
+        providerError.value = ''
       } catch (error) {
-        console.error('Load MCP servers error:', error)
+        console.error('Load providers error:', error)
+        providerError.value = '模型连接加载失败，请检查配置中心后重试。'
       }
     }
 
+    const loadMcpServers = async () => {
+      try {
+        const response = await api.get('/settings/mcp-servers')
+        if (response.data?.status_code !== 1000) throw new Error(response.data?.status_msg || 'MCP 服务加载失败')
+        mcpServers.value = response.data.servers || []
+        mcpServersLoaded.value = true
+        const serverIds = new Set(mcpServers.value.filter(server => server.enabled !== false).map(server => String(server.id)))
+        selectedMcpServerIds.value = selectedMcpServerIds.value.filter(id => serverIds.has(id))
+        handleMcpSelectionChange()
+        mcpError.value = ''
+      } catch (error) {
+        console.error('Load MCP servers error:', error)
+        mcpError.value = 'MCP 服务和工具目录加载失败，请在设置中测试服务后重试。'
+      }
+    }
+
+    const loadKnowledgeFiles = async () => {
+      loadingKnowledge.value = true
+      try {
+        const response = await api.get('/file/files')
+        if (response.data?.status_code !== 1000) throw new Error(response.data?.status_msg || '知识文件状态加载失败')
+        knowledgeFiles.value = response.data.files || []
+        knowledgeError.value = ''
+      } catch (error) {
+        console.error('Load knowledge files error:', error)
+        knowledgeError.value = '知识文件状态加载失败。'
+      } finally {
+        loadingKnowledge.value = false
+      }
+    }
+
+    const refreshCapabilities = () => Promise.all([loadProviders(), loadMcpServers(), loadKnowledgeFiles()])
+
     const handleMcpSelectionChange = () => {
-      const availableIds = new Set(availableMcpTools.value.map(tool => tool.id))
+      if (!mcpServersLoaded.value) return
+      const availableIds = new Set(selectedMcpServers.value.flatMap(server => (server.tools || []).filter(tool => tool.enabled !== false).map(tool => String(tool.id))))
       selectedMcpToolIds.value = selectedMcpToolIds.value.filter(id => availableIds.has(id))
-      if (selectedMcpServerIds.value.length) selectedModel.value = '3'
-      else if (selectedModel.value === '3') selectedModel.value = '1'
+      rememberCurrentSessionCapabilities()
     }
 
     const createNewSession = () => {
       currentSessionId.value = 'temp'
       tempSession.value = true
-      selectedMcpServerIds.value = []
-      selectedMcpToolIds.value = []
-      if (selectedModel.value === '3') selectedModel.value = '1'
       currentMessages.value = []
       // focus input
       nextTick(() => {
@@ -241,10 +399,10 @@ export default {
 
     const switchSession = async (sessionId) => {
       if (!sessionId) return
+      rememberCurrentSessionCapabilities()
       currentSessionId.value = String(sessionId)
       tempSession.value = false
-      selectedMcpServerIds.value = []
-      selectedMcpToolIds.value = []
+      restoreSessionCapabilities(currentSessionId.value)
 
       // lazy load history if not present
       if (!sessions.value[sessionId].messages || sessions.value[sessionId].messages.length === 0) {
@@ -300,6 +458,9 @@ export default {
         return
       }
 
+      chatError.value = ''
+      rememberCurrentSessionCapabilities()
+
       const userMessage = {
         role: 'user',
         content: inputMessage.value
@@ -323,7 +484,8 @@ export default {
         }
       } catch (err) {
         console.error('Send message error:', err)
-        ElMessage.error('发送失败，请重试')
+        chatError.value = errorMessage(err, '发送失败，请检查当前能力配置后重试。')
+        ElMessage.error(chatError.value)
 
         if (!tempSession.value && currentSessionId.value && sessions.value[currentSessionId.value] && sessions.value[currentSessionId.value].messages) {
 
@@ -355,6 +517,7 @@ export default {
 
       if (!tempSession.value && currentSessionId.value && sessions.value[currentSessionId.value]) {
         if (!sessions.value[currentSessionId.value].messages) sessions.value[currentSessionId.value].messages = []
+        sessions.value[currentSessionId.value].messages.push({ role: 'user', content: question })
         sessions.value[currentSessionId.value].messages.push({ role: 'assistant', content: '' })
       }
 
@@ -368,9 +531,11 @@ export default {
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
       }
 
-      const body = tempSession.value
-        ? { question: question, modelType: selectedModel.value, mcpServerIds: selectedMcpServerIds.value, mcpToolIds: selectedMcpToolIds.value }
-        : { question: question, modelType: selectedModel.value, sessionId: currentSessionId.value }
+      const body = {
+        question,
+        ...getCapabilityPayload(),
+        ...(tempSession.value ? {} : { sessionId: currentSessionId.value })
+      }
 
       try {
         // 创建 fetch 连接读取 SSE 流
@@ -381,13 +546,18 @@ export default {
         })
 
         if (!response.ok) {
-          loading.value = false
-          throw new Error('Network response was not ok')
+          const payload = await response.json().catch(() => null)
+          throw new Error(errorMessage({ response: { data: payload } }, `聊天请求失败（${response.status}）`))
+        }
+        if (!(response.headers.get('content-type') || '').includes('text/event-stream') || !response.body) {
+          const payload = await response.json().catch(() => null)
+          throw new Error(errorMessage({ response: { data: payload } }, '聊天服务未返回流式响应，请检查服务状态后重试。'))
         }
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
+        let eventType = 'message'
 
         // 读取流数据
         // eslint-disable-next-line no-constant-condition
@@ -406,6 +576,11 @@ export default {
             const trimmedLine = line.trim()
             if (!trimmedLine) continue
 
+            if (trimmedLine.startsWith('event:')) {
+              eventType = trimmedLine.slice(6).trim()
+              continue
+            }
+
             // 处理 SSE 格式：data: <content>
             if (trimmedLine.startsWith('data:')) {
               const data = trimmedLine.slice(5).trim()
@@ -417,10 +592,15 @@ export default {
                 loading.value = false
                 currentMessages.value[aiMessageIndex].meta = { status: 'done' }
                 currentMessages.value = [...currentMessages.value]
-              } else if (data.startsWith('{')) {
-                // 尝试解析 JSON（如 sessionId）
+              } else {
+                let parsed = null
                 try {
-                  const parsed = JSON.parse(data)
+                  parsed = JSON.parse(data)
+                } catch (_) {
+                  // Plain text chunks are not JSON.
+                }
+
+                if (parsed && typeof parsed === 'object') {
                   if (parsed.sessionId) {
                     const newSid = String(parsed.sessionId)
                     console.log('[SSE] Session ID:', newSid)
@@ -432,19 +612,19 @@ export default {
                       }
                       currentSessionId.value = newSid
                       tempSession.value = false
+                      rememberCurrentSessionCapabilities()
                     }
+                  } else if (eventType === 'error' || parsed.error || parsed.message || parsed.status_msg) {
+                    throw new Error(parsed.status_msg || parsed.message || parsed.error || '聊天流请求失败。')
+                  } else {
+                    currentMessages.value[aiMessageIndex].content += data
                   }
-                } catch (e) {
-                  // 不是 JSON，当作普通文本处理
+                } else {
                   currentMessages.value[aiMessageIndex].content += data
-                  console.log('[SSE] Content updated:', currentMessages.value[aiMessageIndex].content.length)
                 }
-              } else {
-                // 普通文本数据，直接追加
-                // 使用数组索引直接更新，强制 Vue 响应式系统检测变化
-                currentMessages.value[aiMessageIndex].content += data
                 console.log('[SSE] Content updated:', currentMessages.value[aiMessageIndex].content.length)
               }
+              eventType = 'message'
 
               // 每收到一条数据就立即更新 DOM
               // 强制更新整个数组以触发响应式
@@ -465,6 +645,7 @@ export default {
         loading.value = false
         currentMessages.value[aiMessageIndex].meta = { status: 'done' }
         currentMessages.value = [...currentMessages.value]
+        chatError.value = ''
 
         // 同步到 sessions 存储
         if (!tempSession.value && currentSessionId.value && sessions.value[currentSessionId.value]) {
@@ -480,8 +661,16 @@ export default {
         console.error('Stream error:', err)
         loading.value = false
         currentMessages.value[aiMessageIndex].meta = { status: 'error' }
+        if (!currentMessages.value[aiMessageIndex].content) currentMessages.value.splice(aiMessageIndex, 1)
+        const currentSession = sessions.value[currentSessionId.value]
+        const sessionMessages = currentSession?.messages
+        if (Array.isArray(sessionMessages) && sessionMessages.length && sessionMessages[sessionMessages.length - 1].role === 'assistant') {
+          if (!sessionMessages[sessionMessages.length - 1].content) sessionMessages.pop()
+          else sessionMessages[sessionMessages.length - 1].meta = { status: 'error' }
+        }
         currentMessages.value = [...currentMessages.value]
-        ElMessage.error('流式传输出错')
+        chatError.value = errorMessage(err, '流式传输出错，请检查当前能力配置后重试。')
+        ElMessage.error(chatError.value)
       }
     }
 
@@ -491,9 +680,7 @@ export default {
 
         const response = await api.post('/AI/chat/send-new-session', {
           question: question,
-          modelType: selectedModel.value,
-          mcpServerIds: selectedMcpServerIds.value,
-          mcpToolIds: selectedMcpToolIds.value
+          ...getCapabilityPayload()
         })
         if (response.data && response.data.status_code === 1000) {
           const sessionId = String(response.data.sessionId)
@@ -509,9 +696,11 @@ export default {
           }
           currentSessionId.value = sessionId
           tempSession.value = false
+          rememberCurrentSessionCapabilities()
           currentMessages.value = [...sessions.value[sessionId].messages]
         } else {
-          ElMessage.error(response.data?.status_msg || '发送失败')
+          chatError.value = response.data?.status_msg || '创建会话失败，请检查聊天模型配置后重试。'
+          ElMessage.error(chatError.value)
 
           currentMessages.value.pop()
         }
@@ -523,19 +712,18 @@ export default {
 
         const response = await api.post('/AI/chat/send', {
           question: question,
-          modelType: selectedModel.value,
           sessionId: currentSessionId.value,
-          mcpServerIds: selectedMcpServerIds.value,
-          mcpToolIds: selectedMcpToolIds.value
+          ...getCapabilityPayload()
         })
         if (response.data && response.data.status_code === 1000) {
           const aiMessage = { role: 'assistant', content: response.data.Information || '' }
           sessionMsgs.push(aiMessage)
           currentMessages.value = [...sessionMsgs]
         } else {
-          ElMessage.error(response.data?.status_msg || '发送失败')
+          chatError.value = response.data?.status_msg || '发送失败，请检查当前能力配置后重试。'
           sessionMsgs.pop() // rollback
           currentMessages.value.pop()
+          ElMessage.error(chatError.value)
         }
       }
     }
@@ -574,6 +762,7 @@ export default {
 
       try {
         uploading.value = true
+        uploadError.value = ''
         const formData = new FormData()
         formData.append('file', file)
 
@@ -586,13 +775,16 @@ export default {
         if (response.data && response.data.status_code === 1000) {
           ElMessage.success(`文件上传成功`)
         } else {
-          ElMessage.error(response.data?.status_msg || '上传失败')
+          uploadError.value = response.data?.status_msg || '上传失败，请确认文件格式和索引服务状态。'
+          ElMessage.error(uploadError.value)
         }
       } catch (error) {
         console.error('File upload error:', error)
-        ElMessage.error('文件上传失败')
+        uploadError.value = errorMessage(error, '文件上传失败，请稍后重试。')
+        ElMessage.error(uploadError.value)
       } finally {
         uploading.value = false
+        await loadKnowledgeFiles()
         // 清空文件输入
         if (fileInput.value) {
           fileInput.value.value = ''
@@ -602,7 +794,7 @@ export default {
 
     onMounted(() => {
       loadSessions()
-      loadMcpServers()
+      refreshCapabilities()
     })
 
     // expose to template
@@ -615,15 +807,33 @@ export default {
       loading,
       messagesRef,
       messageInput,
-      selectedModel,
+      providers,
+      chatProviders,
+      embeddingProviders,
+      selectedChatProviderId,
+      selectedEmbeddingProviderId,
       mcpServers,
       selectedMcpServerIds,
       selectedMcpToolIds,
-      availableMcpTools,
+      selectedMcpServers,
       handleMcpSelectionChange,
+      rememberCurrentSessionCapabilities,
       isStreaming,
       uploading,
       fileInput,
+      knowledgeFiles,
+      readyKnowledgeFiles,
+      needsRebuildCount,
+      selectedEmbeddingProvider,
+      selectedChatProvider,
+      providerError,
+      mcpError,
+      knowledgeError,
+      chatError,
+      uploadError,
+      loadingKnowledge,
+      loadKnowledgeFiles,
+      refreshCapabilities,
       renderMarkdown,
       playTTS,
       createNewSession,
@@ -641,28 +851,11 @@ export default {
 .ai-chat-container {
   height: 100vh;
   display: flex;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #f3f5f7;
   position: relative;
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
   color: #222;
-}
-
-.ai-chat-container::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="20" cy="20" r="2" fill="rgba(255,255,255,0.08)"/><circle cx="80" cy="80" r="2" fill="rgba(255,255,255,0.08)"/><circle cx="40" cy="60" r="1" fill="rgba(255,255,255,0.06)"/><circle cx="60" cy="30" r="1.5" fill="rgba(255,255,255,0.06)"/></svg>');
-  animation: float 20s ease-in-out infinite;
-  opacity: 0.25;
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0px) rotate(0deg); }
-  50% { transform: translateY(-20px) rotate(180deg); }
 }
 
 .session-list {
@@ -671,8 +864,7 @@ export default {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(15px);
+  background: #fff;
   border-right: 1px solid rgba(0, 0, 0, 0.08);
   box-shadow: 2px 0 20px rgba(0, 0, 0, 0.08);
   position: relative;
@@ -683,7 +875,7 @@ export default {
   padding: 20px;
   text-align: center;
   font-weight: 600;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.06) 0%, rgba(103, 194, 58, 0.06) 100%);
+  background: #f7f9fb;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   display: flex;
   flex-direction: column;
@@ -695,36 +887,20 @@ export default {
   width: 100%;
   padding: 12px 0;
   cursor: pointer;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #1677c8;
   color: white;
   border: none;
   border-radius: 12px;
   font-size: 14px;
   font-weight: 600;
-  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.28);
+  box-shadow: 0 2px 8px rgba(22, 119, 200, 0.2);
   transition: all 0.25s ease;
   position: relative;
   overflow: hidden;
 }
 
-.new-chat-btn::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
-  transition: left 0.5s;
-}
-
-.new-chat-btn:hover::before {
-  left: 100%;
-}
-
 .new-chat-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 25px rgba(102, 126, 234, 0.36);
+  background: #125f9f;
 }
 
 .session-list-ul {
@@ -745,15 +921,14 @@ export default {
 }
 
 .session-item.active {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
+  background: #e8f2fb;
+  color: #12558a;
   font-weight: 600;
-  box-shadow: inset 0 0 20px rgba(102, 126, 234, 0.2);
+  box-shadow: inset 3px 0 0 #1677c8;
 }
 
 .session-item:hover {
-  background: rgba(102, 126, 234, 0.06);
-  transform: translateX(4px);
+  background: #f2f7fb;
 }
 
 /* chat section */
@@ -769,8 +944,7 @@ export default {
 }
 
 .top-bar {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
+  background: #fff;
   color: #2c3e50;
   display: flex;
   align-items: center;
@@ -778,6 +952,7 @@ export default {
   box-shadow: 0 2px 14px rgba(0, 0, 0, 0.06);
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .back-btn {
@@ -799,7 +974,7 @@ export default {
 }
 
 .sync-btn {
-  background: linear-gradient(135deg, #67c23a 0%, #409eff 100%);
+  background: #2f855a;
   color: white;
   padding: 8px 14px;
   border: none;
@@ -817,38 +992,134 @@ export default {
   cursor: not-allowed;
 }
 
-.model-select {
-  margin-left: 6px;
-  padding: 6px 10px;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+.settings-btn {
+  padding: 8px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 8px;
-  background: white;
+  background: #fff;
   color: #2c3e50;
-  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  font-weight: 600;
 }
 
+.settings-btn:hover {
+  border-color: #409eff;
+  color: #1677c8;
+}
+
+.capability-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px 16px;
+  padding: 16px 24px;
+  background: #fff;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.capability-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.capability-field-wide,
+.capability-tools,
+.knowledge-status,
+.capability-error {
+  grid-column: 1 / -1;
+}
+
+.capability-field > label,
 .capability-label {
-  margin-left: 8px;
+  color: #2c3e50;
   font-size: 13px;
   font-weight: 600;
-  color: #2c3e50;
 }
 
 .capability-select {
-  min-width: 140px;
-  max-width: 190px;
-  min-height: 34px;
-  padding: 5px 8px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
   border-radius: 8px;
   background: #fff;
   color: #2c3e50;
 }
 
+.capability-select[multiple] {
+  min-height: 72px;
+}
+
+.capability-select:disabled {
+  background: #f4f5f7;
+  color: #8995a2;
+  cursor: not-allowed;
+}
+
+.capability-hint,
+.knowledge-status {
+  color: #667788;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.knowledge-status {
+  padding: 9px 11px;
+  border: 1px solid #dce3e9;
+  border-radius: 7px;
+  background: #f7f9fb;
+}
+
+.knowledge-status.knowledge-error,
+.capability-error {
+  color: #b42318;
+}
+
+.capability-error {
+  margin: 0;
+  font-size: 13px;
+}
+
+.inline-action {
+  margin-left: 8px;
+  border: 0;
+  background: transparent;
+  color: #1677c8;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.capability-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-group {
+  padding: 8px 10px;
+  border: 1px solid #dce3e9;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.tool-group summary {
+  cursor: pointer;
+  color: #2c3e50;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tool-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 9px 14px 0 0;
+  color: #4a5a68;
+  font-size: 13px;
+}
+
 .upload-btn {
-  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  background: #1677c8;
   color: white;
   padding: 8px 14px;
   border: none;
@@ -856,13 +1127,12 @@ export default {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(245, 87, 108, 0.2);
+  box-shadow: 0 2px 8px rgba(22, 119, 200, 0.2);
   transition: all 0.2s ease;
 }
 
 .upload-btn:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(245, 87, 108, 0.3);
+  background: #125f9f;
 }
 
 .upload-btn:disabled {
@@ -920,9 +1190,10 @@ export default {
 
 .user-message {
   align-self: flex-end;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.16);
+  background: #e8f2fb;
+  color: #16324f;
+  border: 1px solid #cfe2f2;
+  box-shadow: 0 2px 8px rgba(22, 54, 82, 0.06);
 }
 
 .user-message::after {
@@ -934,7 +1205,7 @@ export default {
   height: 0;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
-  border-top: 8px solid #764ba2;
+  border-top: 8px solid #e8f2fb;
 }
 
 .ai-message {
@@ -974,8 +1245,9 @@ export default {
   border-radius: 8px;
   font-size: 12px;
   cursor: pointer;
-  background: linear-gradient(135deg, #67c23a 0%, #409eff 100%);
-  color: white;
+  background: #eaf6ef;
+  color: #237342;
+  border: 1px solid #bfe2ca;
   border: none;
   transition: all 0.18s ease;
   box-shadow: 0 2px 8px rgba(103, 194, 58, 0.18);
@@ -1037,22 +1309,96 @@ export default {
   padding: 12px 22px;
   border: none;
   border-radius: 50px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #1677c8;
   color: white;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 6px 20px rgba(102,126,234,0.18);
+  box-shadow: 0 3px 10px rgba(22,119,200,0.2);
   transition: all 0.18s ease;
 }
 
 .send-btn:hover:not(:disabled) {
-  transform: translateY(-3px) scale(1.02);
+  background: #125f9f;
 }
 
 .send-btn:disabled {
   background: #ccc;
   box-shadow: none;
   cursor: not-allowed;
+}
+
+@media (max-width: 820px) {
+  .ai-chat-container {
+    flex-direction: column;
+  }
+
+  .session-list {
+    width: 100%;
+    height: auto;
+    max-height: 22vh;
+  }
+
+  .session-list-header {
+    padding: 10px 14px;
+    flex-direction: row;
+    justify-content: space-between;
+  }
+
+  .new-chat-btn {
+    width: auto;
+    padding: 9px 16px;
+  }
+
+  .session-list-ul {
+    display: flex;
+    flex: 0 1 auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .session-item {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    white-space: nowrap;
+  }
+
+  .chat-section {
+    flex: 1;
+  }
+
+  .top-bar {
+    flex-wrap: wrap;
+    padding: 10px 16px;
+  }
+
+  .capability-panel {
+    grid-template-columns: 1fr;
+    padding: 14px 16px;
+  }
+
+  .capability-field-wide,
+  .capability-tools,
+  .knowledge-status,
+  .capability-error {
+    grid-column: auto;
+  }
+
+  .chat-messages {
+    padding: 18px;
+  }
+
+  .message {
+    max-width: 88%;
+  }
+
+  .chat-input {
+    padding: 16px;
+  }
+
+  .send-btn {
+    right: 24px;
+    bottom: 22px;
+  }
 }
 </style>

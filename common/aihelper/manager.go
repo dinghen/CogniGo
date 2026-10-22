@@ -2,7 +2,12 @@ package aihelper
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"sync"
+
+	providerService "github.com/dinghen/CogniGo/service/provider"
 )
 
 var ctx = context.Background()
@@ -35,6 +40,15 @@ func (m *AIHelperManager) GetOrCreateAIHelper(userName string, sessionID string,
 	// 检查会话是否已存在
 	helper, exists := userHelpers[sessionID]
 	if exists {
+		fingerprint := capabilityFingerprint(modelType, config)
+		if helper.configFingerprint != fingerprint {
+			factory := GetGlobalFactory()
+			model, err := factory.CreateAIModel(ctx, modelType, config)
+			if err != nil {
+				return nil, err
+			}
+			helper.replaceModel(model, fingerprint)
+		}
 		return helper, nil
 	}
 
@@ -44,9 +58,24 @@ func (m *AIHelperManager) GetOrCreateAIHelper(userName string, sessionID string,
 	if err != nil {
 		return nil, err
 	}
+	helper.configFingerprint = capabilityFingerprint(modelType, config)
 
 	userHelpers[sessionID] = helper
 	return helper, nil
+}
+
+func capabilityFingerprint(modelType string, config map[string]interface{}) string {
+	chat, _ := config["chatProvider"].(providerService.ResolvedConfig)
+	embedding, _ := config["embeddingProvider"].(providerService.ResolvedConfig)
+	chatKeyFingerprint := sha256.Sum256([]byte(chat.APIKey))
+	embeddingKeyFingerprint := sha256.Sum256([]byte(embedding.APIKey))
+	servers, _ := config["mcpServerIDs"].([]uint64)
+	tools, _ := config["mcpToolIDs"].([]uint64)
+	mcpFingerprint, _ := config["mcpFingerprint"].(string)
+	serialized := fmt.Sprintf("%s|chat:%s:%s:%s:%s:%x|embedding:%s:%s:%s:%s:%d:%x|servers:%v|tools:%v|mcp:%s",
+		modelType, chat.Name, chat.Kind, chat.BaseURL, chat.Model, chatKeyFingerprint, embedding.Name, embedding.Kind, embedding.BaseURL, embedding.Model, embedding.Dimension, embeddingKeyFingerprint, servers, tools, mcpFingerprint)
+	fingerprint := sha256.Sum256([]byte(serialized))
+	return hex.EncodeToString(fingerprint[:])
 }
 
 // 获取指定用户的指定会话的AIHelper

@@ -10,9 +10,11 @@ import (
 
 // AIHelper AI助手结构体，包含消息历史和AI模型
 type AIHelper struct {
-	model    AIModel
-	messages []*model.Message
-	mu       sync.RWMutex
+	model             AIModel
+	messages          []*model.Message
+	mu                sync.RWMutex
+	requestMu         sync.Mutex
+	configFingerprint string
 	//一个会话绑定一个AIHelper
 	SessionID string
 	saveFunc  func(*model.Message) (*model.Message, error)
@@ -41,9 +43,12 @@ func (a *AIHelper) AddMessage(Content string, UserName string, IsUser bool, Save
 		UserName:  UserName,
 		IsUser:    IsUser,
 	}
+	a.mu.Lock()
 	a.messages = append(a.messages, &userMsg)
+	saveFunc := a.saveFunc
+	a.mu.Unlock()
 	if Save {
-		a.saveFunc(&userMsg)
+		saveFunc(&userMsg)
 	}
 }
 
@@ -64,17 +69,20 @@ func (a *AIHelper) GetMessages() []*model.Message {
 
 // 同步生成
 func (a *AIHelper) GenerateResponse(userName string, ctx context.Context, userQuestion string) (*model.Message, error) {
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
 
 	//调用存储函数
 	a.AddMessage(userQuestion, userName, true, true)
 
 	a.mu.RLock()
+	aiModel := a.model
 	//将model.Message转化成schema.Message
 	messages := utils.ConvertToSchemaMessages(a.messages)
 	a.mu.RUnlock()
 
 	//调用模型生成回复
-	schemaMsg, err := a.model.GenerateResponse(ctx, messages)
+	schemaMsg, err := aiModel.GenerateResponse(ctx, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -90,15 +98,18 @@ func (a *AIHelper) GenerateResponse(userName string, ctx context.Context, userQu
 
 // 流式生成
 func (a *AIHelper) StreamResponse(userName string, ctx context.Context, cb StreamCallback, userQuestion string) (*model.Message, error) {
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
 
 	//调用存储函数
 	a.AddMessage(userQuestion, userName, true, true)
 
 	a.mu.RLock()
+	aiModel := a.model
 	messages := utils.ConvertToSchemaMessages(a.messages)
 	a.mu.RUnlock()
 
-	content, err := a.model.StreamResponse(ctx, messages, cb)
+	content, err := aiModel.StreamResponse(ctx, messages, cb)
 	if err != nil {
 		return nil, err
 	}
@@ -118,5 +129,20 @@ func (a *AIHelper) StreamResponse(userName string, ctx context.Context, cb Strea
 
 // GetModelType 获取模型类型
 func (a *AIHelper) GetModelType() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.model.GetModelType()
+}
+
+func (a *AIHelper) replaceModel(model AIModel, fingerprint string) {
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+	a.mu.Lock()
+	previous := a.model
+	a.model = model
+	a.configFingerprint = fingerprint
+	a.mu.Unlock()
+	if closer, ok := previous.(interface{ Close() }); ok {
+		closer.Close()
+	}
 }

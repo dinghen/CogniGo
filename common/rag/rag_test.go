@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -67,6 +69,47 @@ func TestEmbeddingIndexIdentityMismatchRequiresRebuild(t *testing.T) {
 		if ref.MatchesEmbedding(identity.endpoint, identity.model, identity.dimension) {
 			t.Fatalf("identity unexpectedly matched: %#v", identity)
 		}
+	}
+}
+
+func TestListKnowledgeFilesTreatsMissingDirectoryAsEmpty(t *testing.T) {
+	files, err := listKnowledgeFiles(filepath.Join(t.TempDir(), "missing-user"))
+	if !errors.Is(err, ErrNoKnowledgeFiles) {
+		t.Fatalf("listKnowledgeFiles error = %v, want ErrNoKnowledgeFiles", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("listKnowledgeFiles returned files for missing directory: %v", files)
+	}
+}
+
+func TestListKnowledgeFilesTreatsEmptyDirectoryAsEmpty(t *testing.T) {
+	files, err := listKnowledgeFiles(t.TempDir())
+	if !errors.Is(err, ErrNoKnowledgeFiles) {
+		t.Fatalf("listKnowledgeFiles error = %v, want ErrNoKnowledgeFiles", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("listKnowledgeFiles returned files for empty directory: %v", files)
+	}
+}
+
+func TestListKnowledgeFilesIgnoresDirectoriesAndStagingFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".staging"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.md"), []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := listKnowledgeFiles(dir)
+	if err != nil {
+		t.Fatalf("listKnowledgeFiles error = %v", err)
+	}
+	if len(files) != 1 || files[0] != "notes.md" {
+		t.Fatalf("listKnowledgeFiles = %v, want [notes.md]", files)
 	}
 }
 

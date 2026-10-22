@@ -88,8 +88,12 @@
             </div>
             <p class="resource-meta truncate">{{ server.url || server.command }}</p>
             <p class="resource-meta">{{ server.tools?.length || 0 }} 个已发现工具</p>
-            <div class="tool-chips">
-              <el-tag v-for="tool in server.tools || []" :key="tool.id" size="small">{{ tool.name }}</el-tag>
+            <div class="tool-details">
+              <details v-for="tool in server.tools || []" :key="tool.id">
+                <summary>{{ tool.name }}</summary>
+                <p>{{ tool.description || '暂无描述' }}</p>
+                <pre>{{ formatSchema(tool.input_schema) }}</pre>
+              </details>
             </div>
             <div class="card-actions">
               <el-button size="small" @click="testMcp(server)">测试并发现工具</el-button>
@@ -115,6 +119,10 @@
     </el-dialog>
 
     <el-dialog v-model="mcpDialog" :title="editingMcp ? '编辑 MCP 服务' : '添加 MCP 服务'" width="560px">
+      <div class="mcp-example-row">
+        <el-button size="small" @click="loadMcpExample">填充不可运行的示例</el-button>
+        <span>示例只填入表单，不会自动保存。</span>
+      </div>
       <el-form :model="mcpForm" label-position="top">
         <el-form-item label="名称"><el-input v-model="mcpForm.name" placeholder="例如：天气服务" /></el-form-item>
         <el-form-item label="传输方式"><el-radio-group v-model="mcpForm.transport"><el-radio-button label="streamable-http">Streamable HTTP</el-radio-button><el-radio-button label="stdio">stdio</el-radio-button></el-radio-group></el-form-item>
@@ -180,8 +188,20 @@ export default {
     const removeProvider = async provider => { try { await ElMessageBox.confirm(`删除连接“${provider.name}”？`, '确认删除', { type: 'warning' }); await api.delete(`/settings/providers/${provider.id}`); await loadProviders() } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error('删除连接失败') } }
 
     const openMcpForm = server => { editingMcp.value = server || null; Object.assign(mcpForm, server ? { ...server, headers: {}, env: {}, args: server.args || [] } : blankMcp()); mcpHeadersText.value = '{}'; mcpEnvText.value = '{}'; mcpArgsText.value = (server?.args || []).join('\n'); mcpDialog.value = true }
-    const parseObject = text => { const value = JSON.parse(text || '{}'); if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('必须是 JSON 对象'); return value }
-    const saveMcp = async () => { savingMcp.value = true; try { const payload = { ...mcpForm, args: mcpForm.transport === 'stdio' ? mcpArgsText.value.split('\n').map(v => v.trim()).filter(Boolean) : [], headers: mcpForm.transport === 'streamable-http' ? parseObject(mcpHeadersText.value) : {}, env: mcpForm.transport === 'stdio' ? parseObject(mcpEnvText.value) : {} }; const request = editingMcp.value ? api.put(`/settings/mcp-servers/${editingMcp.value.id}`, payload) : api.post('/settings/mcp-servers', payload); await request; mcpDialog.value = false; ElMessage.success('MCP 服务已保存'); await loadMcp() } catch (e) { ElMessage.error(e.response?.data?.status_msg || e.message || '保存 MCP 服务失败') } finally { savingMcp.value = false } }
+    const loadMcpExample = () => { editingMcp.value = null; Object.assign(mcpForm, { ...blankMcp(), name: 'Example (replace before use)', url: 'https://mcp-example.invalid/mcp' }); mcpHeadersText.value = JSON.stringify({ Authorization: 'Bearer REPLACE_WITH_A_REAL_TOKEN' }, null, 2); mcpEnvText.value = '{}'; mcpArgsText.value = '' }
+    const parseStringMap = (text, field) => {
+      const label = field === 'headers' ? 'Headers' : '环境变量'
+      let value
+      try { value = JSON.parse(text || '{}') } catch (_) { throw new Error(`${label} JSON 格式无效`) }
+      if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error(`${label} 必须是 JSON 对象`)
+      if (Object.keys(value).length === 1 && value[field] && !Array.isArray(value[field]) && typeof value[field] === 'object') value = value[field]
+      for (const [key, item] of Object.entries(value)) {
+        if (typeof item !== 'string') throw new Error(`${label} 中的 "${key}" 必须是字符串`)
+      }
+      return value
+    }
+    const formatSchema = schema => JSON.stringify(schema || {}, null, 2)
+    const saveMcp = async () => { savingMcp.value = true; try { const payload = { ...mcpForm, args: mcpForm.transport === 'stdio' ? mcpArgsText.value.split('\n').map(v => v.trim()).filter(Boolean) : [], headers: mcpForm.transport === 'streamable-http' ? parseStringMap(mcpHeadersText.value, 'headers') : {}, env: mcpForm.transport === 'stdio' ? parseStringMap(mcpEnvText.value, 'env') : {} }; const request = editingMcp.value ? api.put(`/settings/mcp-servers/${editingMcp.value.id}`, payload) : api.post('/settings/mcp-servers', payload); await request; mcpDialog.value = false; ElMessage.success('MCP 服务已保存'); await loadMcp() } catch (e) { ElMessage.error(e.response?.data?.status_msg || e.message || '保存 MCP 服务失败') } finally { savingMcp.value = false } }
     const testMcp = async server => { try { await api.post(`/settings/mcp-servers/${server.id}/test`); ElMessage.success('连接成功，工具目录已更新'); await loadMcp() } catch (e) { ElMessage.error(e.response?.data?.status_msg || 'MCP 连接测试失败') } }
     const removeMcp = async server => { try { await ElMessageBox.confirm(`删除服务“${server.name}”？`, '确认删除', { type: 'warning' }); await api.delete(`/settings/mcp-servers/${server.id}`); await loadMcp() } catch (e) { if (e !== 'cancel' && e !== 'close') ElMessage.error('删除 MCP 服务失败') } }
     const uploadKnowledge = async options => { uploading.value = true; try { const form = new FormData(); form.append('file', options.file); await api.post('/file/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } }); ElMessage.success('文件上传成功'); await loadKnowledge() } catch (e) { options.onError(e); ElMessage.error('文件上传失败') } finally { uploading.value = false } }
@@ -189,7 +209,7 @@ export default {
     const logout = () => { localStorage.removeItem('token'); router.push('/login') }
 
     onMounted(reload)
-    return { providers, mcpServers, knowledgeFiles, loadingProviders, loadingMcp, loadingKnowledge, savingProvider, savingMcp, uploading, providerError, mcpError, knowledgeError, providerDialog, mcpDialog, editingProvider, editingMcp, providerForm, mcpForm, mcpHeadersText, mcpEnvText, mcpArgsText, statusType, openProviderForm, saveProvider, testProvider, rebuildProvider, removeProvider, openMcpForm, saveMcp, testMcp, removeMcp, uploadKnowledge, removeKnowledge, logout }
+    return { providers, mcpServers, knowledgeFiles, loadingProviders, loadingMcp, loadingKnowledge, savingProvider, savingMcp, uploading, providerError, mcpError, knowledgeError, providerDialog, mcpDialog, editingProvider, editingMcp, providerForm, mcpForm, mcpHeadersText, mcpEnvText, mcpArgsText, statusType, openProviderForm, saveProvider, testProvider, rebuildProvider, removeProvider, openMcpForm, loadMcpExample, saveMcp, testMcp, removeMcp, formatSchema, uploadKnowledge, removeKnowledge, logout }
   }
 }
 </script>
@@ -215,7 +235,12 @@ h1 { margin-bottom: 8px; font-size: 32px; }
 .resource-meta { margin-bottom: 8px; font-size: 13px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 16px; }
-.tool-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; }
+.tool-details { display: grid; gap: 6px; margin-top: 10px; }
+.tool-details details { padding: 8px 0; border-top: 1px solid #edf0f2; }
+.tool-details summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.tool-details p { margin: 8px 0; color: #667788; font-size: 13px; }
+.tool-details pre { max-height: 180px; overflow: auto; margin: 0; padding: 10px; background: #f4f6f8; color: #243142; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-example-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: #667788; font-size: 13px; }
 .file-list { overflow: hidden; background: #fff; border: 1px solid #dce3e9; border-radius: 8px; }
 .file-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #edf0f2; }
 .file-row:last-child { border-bottom: 0; }

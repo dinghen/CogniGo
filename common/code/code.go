@@ -22,9 +22,10 @@ const (
 
 	CodeServerBusy Code = 4001
 
-	AIModelNotFind    Code = 5001
-	AIModelCannotOpen Code = 5002
-	AIModelFail       Code = 5003
+	AIModelNotFind         Code = 5001
+	AIModelCannotOpen      Code = 5002
+	AIModelFail            Code = 5003
+	AIModelRebuildRequired Code = 5004
 
 	TTSFail Code = 6001
 )
@@ -47,10 +48,11 @@ var msg = map[Code]string{
 
 	CodeServerBusy: "服务繁忙",
 
-	AIModelNotFind:    "模型不存在",
-	AIModelCannotOpen: "无法打开模型",
-	AIModelFail:       "模型运行失败",
-	TTSFail:           "语音服务失败",
+	AIModelNotFind:         "模型不存在",
+	AIModelCannotOpen:      "无法打开模型",
+	AIModelFail:            "模型运行失败",
+	AIModelRebuildRequired: "所选 Embedding 模型与当前知识索引不一致，请在设置中重建索引后重试。",
+	TTSFail:                "语音服务失败",
 }
 
 func (code Code) Code() int64 {

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -29,6 +30,19 @@ func TestEncryptSecretRequiresValidMasterKey(t *testing.T) {
 	t.Setenv("COGNIGO_PROVIDER_ENCRYPTION_KEY", "too-short")
 	if _, err := EncryptSecret("secret"); err == nil {
 		t.Fatal("EncryptSecret() should reject a short master key")
+	}
+}
+
+func TestEncryptDecryptAcceptsHexMasterKey(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	t.Setenv("COGNIGO_PROVIDER_ENCRYPTION_KEY", hex.EncodeToString(key))
+	encoded, err := EncryptSecret("hex-secret")
+	if err != nil {
+		t.Fatalf("EncryptSecret() error = %v", err)
+	}
+	decoded, err := DecryptSecret(encoded)
+	if err != nil || decoded != "hex-secret" {
+		t.Fatalf("DecryptSecret() = %q, %v", decoded, err)
 	}
 }
 

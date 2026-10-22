@@ -17,10 +17,12 @@ type (
 		Sessions []model.SessionInfo `json:"sessions,omitempty"`
 	}
 	CreateSessionAndSendMessageRequest struct {
-		UserQuestion string   `json:"question" binding:"required"`  // 用户问题;
-		ModelType    string   `json:"modelType" binding:"required"` // 模型类型;
-		MCPServerIDs []uint64 `json:"mcpServerIds,omitempty"`
-		MCPToolIDs   []uint64 `json:"mcpToolIds,omitempty"`
+		UserQuestion        string   `json:"question" binding:"required"` // 用户问题;
+		ModelType           string   `json:"modelType,omitempty"`         // legacy model selector;
+		ChatProviderID      *uint64  `json:"chatProviderId,omitempty"`
+		EmbeddingProviderID *uint64  `json:"embeddingProviderId,omitempty"`
+		MCPServerIDs        []uint64 `json:"mcpServerIds,omitempty"`
+		MCPToolIDs          []uint64 `json:"mcpToolIds,omitempty"`
 	}
 
 	CreateSessionAndSendMessageResponse struct {
@@ -30,11 +32,13 @@ type (
 	}
 
 	ChatSendRequest struct {
-		UserQuestion string   `json:"question" binding:"required"`            // 用户问题;
-		ModelType    string   `json:"modelType" binding:"required"`           // 模型类型;
-		SessionID    string   `json:"sessionId,omitempty" binding:"required"` // 当前会话ID
-		MCPServerIDs []uint64 `json:"mcpServerIds,omitempty"`
-		MCPToolIDs   []uint64 `json:"mcpToolIds,omitempty"`
+		UserQuestion        string   `json:"question" binding:"required"`            // 用户问题;
+		ModelType           string   `json:"modelType,omitempty"`                    // legacy model selector;
+		SessionID           string   `json:"sessionId,omitempty" binding:"required"` // 当前会话ID
+		ChatProviderID      *uint64  `json:"chatProviderId,omitempty"`
+		EmbeddingProviderID *uint64  `json:"embeddingProviderId,omitempty"`
+		MCPServerIDs        []uint64 `json:"mcpServerIds,omitempty"`
+		MCPToolIDs          []uint64 `json:"mcpToolIds,omitempty"`
 	}
 
 	ChatSendResponse struct {
@@ -75,7 +79,8 @@ func CreateSessionAndSendMessage(c *gin.Context) {
 		return
 	}
 	//内部会创建会话并发送消息，并会将AI回答、当前会话返回
-	session_id, aiInformation, code_ := session.CreateSessionAndSendMessage(userName, req.UserQuestion, req.ModelType, req.MCPServerIDs, req.MCPToolIDs)
+	selection := session.CapabilitySelection{ChatProviderID: req.ChatProviderID, EmbeddingProviderID: req.EmbeddingProviderID, MCPServerIDs: req.MCPServerIDs, MCPToolIDs: req.MCPToolIDs, MCPSelectionProvided: req.MCPServerIDs != nil || req.MCPToolIDs != nil}
+	session_id, aiInformation, code_ := session.CreateSessionAndSendMessageWithProviders(userName, req.UserQuestion, req.ModelType, req.MCPServerIDs, req.MCPToolIDs, selection)
 
 	if code_ != code.CodeSuccess {
 		c.JSON(http.StatusOK, res.CodeOf(code_))
@@ -104,9 +109,10 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
 
 	// 先创建会话并立即把 sessionId 下发给前端，随后再开始流式输出
-	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.MCPServerIDs, req.MCPToolIDs)
+	selection := session.CapabilitySelection{ChatProviderID: req.ChatProviderID, EmbeddingProviderID: req.EmbeddingProviderID, MCPServerIDs: req.MCPServerIDs, MCPToolIDs: req.MCPToolIDs, MCPSelectionProvided: req.MCPServerIDs != nil || req.MCPToolIDs != nil}
+	sessionID, code_ := session.CreateStreamSessionOnlyWithProviders(userName, req.UserQuestion, req.MCPServerIDs, req.MCPToolIDs, selection)
 	if code_ != code.CodeSuccess {
-		c.SSEvent("error", gin.H{"message": "Failed to create session"})
+		c.SSEvent("error", gin.H{"status_code": code_.Code(), "status_msg": code_.Msg()})
 		return
 	}
 
@@ -115,9 +121,9 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 	c.Writer.Flush()
 
 	// 然后开始把本次回答进行流式发送（包含最后的 [DONE]）
-	code_ = session.StreamMessageToExistingSession(userName, sessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer))
+	code_ = session.StreamMessageToExistingSessionWithProviders(userName, sessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer), selection)
 	if code_ != code.CodeSuccess {
-		c.SSEvent("error", gin.H{"message": "Failed to send message"})
+		c.SSEvent("error", gin.H{"status_code": code_.Code(), "status_msg": code_.Msg()})
 		return
 	}
 }
@@ -131,7 +137,8 @@ func ChatSend(c *gin.Context) {
 		return
 	}
 	// 发送消息，并会将AI回答返回
-	aiInformation, code_ := session.ChatSend(userName, req.SessionID, req.UserQuestion, req.ModelType)
+	selection := session.CapabilitySelection{ChatProviderID: req.ChatProviderID, EmbeddingProviderID: req.EmbeddingProviderID, MCPServerIDs: req.MCPServerIDs, MCPToolIDs: req.MCPToolIDs, MCPSelectionProvided: req.MCPServerIDs != nil || req.MCPToolIDs != nil}
+	aiInformation, code_ := session.ChatSendWithProviders(userName, req.SessionID, req.UserQuestion, req.ModelType, selection)
 
 	if code_ != code.CodeSuccess {
 		c.JSON(http.StatusOK, res.CodeOf(code_))
@@ -158,9 +165,10 @@ func ChatStreamSend(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
 
-	code_ := session.ChatStreamSend(userName, req.SessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer))
+	selection := session.CapabilitySelection{ChatProviderID: req.ChatProviderID, EmbeddingProviderID: req.EmbeddingProviderID, MCPServerIDs: req.MCPServerIDs, MCPToolIDs: req.MCPToolIDs, MCPSelectionProvided: req.MCPServerIDs != nil || req.MCPToolIDs != nil}
+	code_ := session.ChatStreamSendWithProviders(userName, req.SessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer), selection)
 	if code_ != code.CodeSuccess {
-		c.SSEvent("error", gin.H{"message": "Failed to send message"})
+		c.SSEvent("error", gin.H{"status_code": code_.Code(), "status_msg": code_.Msg()})
 		return
 	}
 

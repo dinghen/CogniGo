@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+var errInvalidMCPID = errors.New("invalid MCP server id")
 
 type response struct {
 	controller.Response
@@ -47,8 +50,8 @@ func Get(c *gin.Context) {
 func Create(c *gin.Context) {
 	res := new(response)
 	var in mcpService.Input
-	if c.ShouldBindJSON(&in) != nil {
-		returnError(c, res, mcpService.ErrInvalidInput)
+	if err := bindInput(c, &in); err != nil {
+		returnError(c, res, err)
 		return
 	}
 	item, err := mcpService.Create(c.GetString("userName"), in)
@@ -68,8 +71,8 @@ func Update(c *gin.Context) {
 		return
 	}
 	var in mcpService.Input
-	if c.ShouldBindJSON(&in) != nil {
-		returnError(c, res, mcpService.ErrInvalidInput)
+	if err := bindInput(c, &in); err != nil {
+		returnError(c, res, err)
 		return
 	}
 	item, err := mcpService.Update(c.GetString("userName"), id, in)
@@ -112,14 +115,41 @@ func Test(c *gin.Context) {
 func parseID(c *gin.Context) (uint64, error) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		return 0, errors.New("invalid MCP server id")
+		return 0, errInvalidMCPID
 	}
 	return id, nil
 }
+
+func bindInput(c *gin.Context, in *mcpService.Input) error {
+	if err := c.ShouldBindJSON(in); err != nil {
+		if errors.Is(err, mcpService.ErrInvalidInput) || errors.Is(err, mcpService.ErrInvalidHeaders) || errors.Is(err, mcpService.ErrInvalidEnv) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", mcpService.ErrInvalidInput, err)
+	}
+	return nil
+}
+
 func returnError(c *gin.Context, res *response, err error) {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, res.CodeOf(code.CodeRecordNotFound))
 		return
 	}
-	c.JSON(http.StatusBadRequest, res.CodeOf(code.CodeInvalidParams))
+	if errors.Is(err, mcpService.ErrUnavailable) {
+		res.StatusCode = code.CodeServerBusy
+		res.StatusMsg = "MCP service unavailable"
+		c.JSON(http.StatusServiceUnavailable, res)
+		return
+	}
+	if errors.Is(err, errInvalidMCPID) || errors.Is(err, mcpService.ErrInvalidInput) ||
+		errors.Is(err, mcpService.ErrInvalidHeaders) || errors.Is(err, mcpService.ErrInvalidEnv) ||
+		errors.Is(err, mcpService.ErrInvalidTransport) || errors.Is(err, mcpService.ErrPrivateHTTP) {
+		res.StatusCode = code.CodeInvalidParams
+		res.StatusMsg = err.Error()
+		c.JSON(http.StatusBadRequest, res)
+		return
+	}
+	res.StatusCode = code.CodeServerBusy
+	res.StatusMsg = "MCP service unavailable"
+	c.JSON(http.StatusServiceUnavailable, res)
 }

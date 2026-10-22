@@ -2,6 +2,8 @@
 set -u
 
 failures=0
+ROOT_DIR=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT_DIR"
 
 check_command() {
   if command -v "$1" >/dev/null 2>&1; then
@@ -26,15 +28,24 @@ check_command npm
 check_command curl
 check_command tar
 
-if command -v docker >/dev/null 2>&1; then
-  if docker info >/dev/null 2>&1; then
+docker_bin=${COGNIGO_DOCKER_BIN:-}
+if [ -z "$docker_bin" ] && command -v docker >/dev/null 2>&1; then
+  docker_bin=$(command -v docker)
+elif [ -z "$docker_bin" ] && command -v docker.exe >/dev/null 2>&1; then
+  docker_bin=$(command -v docker.exe)
+elif [ -z "$docker_bin" ] && [ -x '/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe' ]; then
+  docker_bin='/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe'
+fi
+
+if [ -n "$docker_bin" ]; then
+  if "$docker_bin" info >/dev/null 2>&1 && "$docker_bin" compose version >/dev/null 2>&1; then
     printf '[ok]   Docker daemon\n'
   else
-    printf '[fail] Docker daemon is unavailable; start Docker Desktop and enable WSL integration\n'
+    printf '[fail] Docker daemon or Compose is unavailable; start Docker Desktop\n'
     failures=$((failures + 1))
   fi
 else
-  printf '[fail] docker is not installed\n'
+  printf '[fail] Docker CLI not found; install Docker or enable Docker Desktop WSL integration\n'
   failures=$((failures + 1))
 fi
 

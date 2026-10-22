@@ -23,6 +23,9 @@ var (
 	ErrInvalidInput     = errors.New("MCP configuration is invalid")
 	ErrInvalidTransport = errors.New("MCP transport must be streamable-http or stdio")
 	ErrPrivateHTTP      = errors.New("private MCP HTTP targets are not allowed")
+	ErrInvalidHeaders   = errors.New("MCP headers are invalid")
+	ErrInvalidEnv       = errors.New("MCP environment variables are invalid")
+	ErrUnavailable      = errors.New("MCP service is unavailable")
 )
 
 type Input struct {
@@ -34,6 +37,72 @@ type Input struct {
 	Args      []string          `json:"args"`
 	Env       map[string]string `json:"env"`
 	Enabled   *bool             `json:"enabled"`
+}
+
+func (in *Input) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name      string          `json:"name"`
+		Transport string          `json:"transport"`
+		URL       string          `json:"url"`
+		Headers   json.RawMessage `json:"headers"`
+		Command   string          `json:"command"`
+		Args      []string        `json:"args"`
+		Env       json.RawMessage `json:"env"`
+		Enabled   *bool           `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ErrInvalidInput
+	}
+	headers, err := normalizeStringMap("headers", raw.Headers)
+	if err != nil {
+		return err
+	}
+	env, err := normalizeStringMap("env", raw.Env)
+	if err != nil {
+		return err
+	}
+	*in = Input{
+		Name: raw.Name, Transport: raw.Transport, URL: raw.URL,
+		Headers: headers, Command: raw.Command, Args: raw.Args,
+		Env: env, Enabled: raw.Enabled,
+	}
+	return nil
+}
+
+func normalizeStringMap(field string, raw json.RawMessage) (map[string]string, error) {
+	invalid := ErrInvalidHeaders
+	if field == "env" {
+		invalid = ErrInvalidEnv
+	}
+	values := map[string]string{}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return values, nil
+	}
+	if trimmed == "null" {
+		return nil, fmt.Errorf("%w: %s must be a JSON object with string values", invalid, field)
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, fmt.Errorf("%w: %s must be a JSON object with string values", invalid, field)
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
+		return nil, fmt.Errorf("%w: %s must be a JSON object with string values", invalid, field)
+	}
+	// Accept only the known wrapper users sometimes paste from examples.
+	if len(entries) == 1 {
+		if nested, ok := entries[field]; ok && strings.HasPrefix(strings.TrimSpace(string(nested)), "{") {
+			return normalizeStringMap(field, nested)
+		}
+	}
+	for key, value := range entries {
+		var decoded string
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return nil, fmt.Errorf("%w: %s[%q] must be a string", invalid, field, key)
+		}
+		values[key] = decoded
+	}
+	return values, nil
 }
 
 type DTO struct {
@@ -62,6 +131,7 @@ type ToolDTO struct {
 // only while constructing a session model. Secrets never cross the API DTO.
 type RuntimeSelection struct {
 	ServerID     uint64
+	UpdatedAt    time.Time
 	Config       mcpclient.Config
 	AllowedTools map[string]struct{}
 }
@@ -118,8 +188,11 @@ func validate(in Input) error {
 			}
 		}
 	}
-	if len(in.Headers) > 32 || len(in.Env) > 32 {
-		return ErrInvalidInput
+	if len(in.Headers) > 32 {
+		return fmt.Errorf("%w: headers cannot contain more than 32 entries", ErrInvalidHeaders)
+	}
+	if len(in.Env) > 32 {
+		return fmt.Errorf("%w: env cannot contain more than 32 entries", ErrInvalidEnv)
 	}
 	return nil
 }
@@ -212,7 +285,10 @@ func List(username string) ([]DTO, error) {
 		if e != nil {
 			return nil, e
 		}
-		ts, _ := mcpDAO.ListTools(rows[i].ID)
+		ts, e := mcpDAO.ListTools(rows[i].ID)
+		if e != nil {
+			return nil, e
+		}
 		out = append(out, toDTO(&rows[i], ts, h, env))
 	}
 	return out, nil
@@ -224,7 +300,7 @@ func Get(username string, id uint64) (DTO, error) {
 	}
 	row, err := mcpDAO.GetServer(uid, id)
 	if err != nil {
-		return DTO{}, mcpDAO.ErrNotFound
+		return DTO{}, err
 	}
 	h, e := open(row.EncryptedHeaders)
 	if e != nil {
@@ -255,7 +331,7 @@ func save(username string, id uint64, in Input) (DTO, error) {
 	if id != 0 {
 		existing, err = mcpDAO.GetServer(uid, id)
 		if err != nil {
-			return DTO{}, mcpDAO.ErrNotFound
+			return DTO{}, err
 		}
 	}
 	headerCipher, envCipher := "", ""
@@ -315,7 +391,10 @@ func ValidateSelection(username string, serverIDs, toolIDs []uint64) error {
 			return ErrInvalidInput
 		}
 		row, getErr := mcpDAO.GetServer(userID, id)
-		if getErr != nil || !row.Enabled {
+		if getErr != nil {
+			return getErr
+		}
+		if !row.Enabled {
 			return mcpDAO.ErrNotFound
 		}
 		servers[id] = true
@@ -330,6 +409,9 @@ func ValidateSelection(username string, serverIDs, toolIDs []uint64) error {
 			if getErr == nil && tool.Enabled {
 				found = true
 				break
+			}
+			if getErr != nil && !errors.Is(getErr, mcpDAO.ErrNotFound) {
+				return getErr
 			}
 		}
 		if !found {
@@ -361,7 +443,7 @@ func ResolveRuntimeSelections(username string, serverIDs, toolIDs []uint64) ([]R
 	for _, serverID := range serverIDs {
 		row, err := mcpDAO.GetServer(userID, serverID)
 		if err != nil {
-			return nil, mcpDAO.ErrNotFound
+			return nil, err
 		}
 		headers, err := open(row.EncryptedHeaders)
 		if err != nil {
@@ -385,7 +467,8 @@ func ResolveRuntimeSelections(username string, serverIDs, toolIDs []uint64) ([]R
 			}
 		}
 		selections = append(selections, RuntimeSelection{
-			ServerID: row.ID,
+			ServerID:  row.ID,
+			UpdatedAt: row.UpdatedAt,
 			Config: mcpclient.Config{
 				Transport: row.Transport,
 				URL:       row.URL,
@@ -407,7 +490,7 @@ func Test(ctx context.Context, username string, id uint64) (DTO, error) {
 	}
 	row, err := mcpDAO.GetServer(uid, id)
 	if err != nil {
-		return DTO{}, mcpDAO.ErrNotFound
+		return DTO{}, err
 	}
 	headers, e := open(row.EncryptedHeaders)
 	if e != nil {
@@ -422,12 +505,12 @@ func Test(ctx context.Context, username string, id uint64) (DTO, error) {
 	defer cancel()
 	client, e := mcpclient.NewMCPClientWithConfig(ctx, mcpclient.Config{Transport: row.Transport, URL: row.URL, Headers: headers, Command: row.Command, Args: decodeArgs(row.ArgsJSON), Env: env})
 	if e != nil {
-		return DTO{}, fmt.Errorf("MCP connection failed: %w", e)
+		return DTO{}, fmt.Errorf("%w: connection failed: %w", ErrUnavailable, e)
 	}
 	defer client.Close()
 	discovered, e := client.ListTools(ctx)
 	if e != nil {
-		return DTO{}, fmt.Errorf("MCP tool discovery failed: %w", e)
+		return DTO{}, fmt.Errorf("%w: tool discovery failed: %w", ErrUnavailable, e)
 	}
 	tools := make([]model.MCPTool, 0, len(discovered))
 	for _, t := range discovered {

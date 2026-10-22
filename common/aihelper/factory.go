@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	providerService "github.com/dinghen/CogniGo/service/provider"
 )
 
 // ModelCreator 定义模型创建函数类型（需要 context）
@@ -34,6 +36,9 @@ func GetGlobalFactory() *AIModelFactory {
 func (f *AIModelFactory) registerCreators() {
 	//OpenAI
 	f.creators["1"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
+		if resolved, ok := config["chatProvider"].(providerService.ResolvedConfig); ok {
+			return NewOpenAIModelForProvider(ctx, resolved)
+		}
 		if username, ok := config["username"].(string); ok && username != "" {
 			return NewOpenAIModelForUser(ctx, username)
 		}
@@ -46,6 +51,16 @@ func (f *AIModelFactory) registerCreators() {
 		if !ok {
 			return nil, fmt.Errorf("RAG model requires username")
 		}
+		var chat, embedding *providerService.ResolvedConfig
+		if resolved, ok := config["chatProvider"].(providerService.ResolvedConfig); ok {
+			chat = &resolved
+		}
+		if resolved, ok := config["embeddingProvider"].(providerService.ResolvedConfig); ok {
+			embedding = &resolved
+		}
+		if chat != nil || embedding != nil {
+			return NewAliRAGModelForProviders(ctx, username, chat, embedding)
+		}
 		return NewAliRAGModel(ctx, username)
 	}
 
@@ -55,6 +70,16 @@ func (f *AIModelFactory) registerCreators() {
 		if !ok {
 			return nil, fmt.Errorf("MCP model requires username")
 		}
+		if resolved, ok := config["chatProvider"].(providerService.ResolvedConfig); ok {
+			var serverIDs, toolIDs []uint64
+			if values, ok := config["mcpServerIDs"].([]uint64); ok {
+				serverIDs = values
+			}
+			if values, ok := config["mcpToolIDs"].([]uint64); ok {
+				toolIDs = values
+			}
+			return NewMCPModelWithProvider(ctx, username, resolved, serverIDs, toolIDs)
+		}
 		var serverIDs, toolIDs []uint64
 		if values, ok := config["mcpServerIDs"].([]uint64); ok {
 			serverIDs = values
@@ -63,6 +88,30 @@ func (f *AIModelFactory) registerCreators() {
 			toolIDs = values
 		}
 		return NewMCPModelWithSelections(ctx, username, serverIDs, toolIDs)
+	}
+
+	// Unified capability model. The request may combine knowledge retrieval and
+	// selected MCP tools; when neither is selected it falls back to chat only.
+	f.creators["capability"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
+		username, ok := config["username"].(string)
+		if !ok || username == "" {
+			return nil, fmt.Errorf("capability model requires username")
+		}
+		var chat, embedding *providerService.ResolvedConfig
+		if resolved, ok := config["chatProvider"].(providerService.ResolvedConfig); ok {
+			chat = &resolved
+		}
+		if resolved, ok := config["embeddingProvider"].(providerService.ResolvedConfig); ok {
+			embedding = &resolved
+		}
+		var serverIDs, toolIDs []uint64
+		if values, ok := config["mcpServerIDs"].([]uint64); ok {
+			serverIDs = values
+		}
+		if values, ok := config["mcpToolIDs"].([]uint64); ok {
+			toolIDs = values
+		}
+		return NewCapabilityModel(ctx, username, chat, embedding, serverIDs, toolIDs)
 	}
 
 	//Ollama（目前提供接口实现，暂不提供应用，因为考虑到本地模型会占用很多空间）todo做

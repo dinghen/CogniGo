@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +25,11 @@ import (
 	providerService "github.com/dinghen/CogniGo/service/provider"
 	"github.com/google/uuid"
 	redisCli "github.com/redis/go-redis/v9"
+)
+
+var (
+	ErrNoKnowledgeFiles     = errors.New("no valid knowledge files found")
+	ErrIndexRebuildRequired = errors.New("RAG index requires rebuild")
 )
 
 const (
@@ -494,24 +500,26 @@ func rollbackActivatedRebuild(ctx context.Context, username string, previous map
 }
 
 func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
-	cfg := config.GetConfig()
-	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
-	files, err := os.ReadDir(userDir)
-	if err != nil {
-		return nil, fmt.Errorf("no uploaded file found for user %s", username)
-	}
-	filenames := make([]string, 0)
-	for _, file := range files {
-		if !file.IsDir() && !strings.HasPrefix(file.Name(), ".") {
-			filenames = append(filenames, file.Name())
-		}
-	}
-	if len(filenames) == 0 {
-		return nil, fmt.Errorf("no valid file found for user %s", username)
-	}
 	resolved, err := providerService.Resolve(username, "embedding")
 	if err != nil {
 		return nil, fmt.Errorf("resolve embedding provider: %w", err)
+	}
+	return NewRAGQueryForProvider(ctx, username, resolved)
+}
+
+// NewRAGQueryForProvider uses the embedding provider selected by the session.
+// Active generations are admitted only when endpoint, model, fingerprint, and
+// probed dimension all match; otherwise callers receive a rebuild-required
+// error while the previous active generation remains untouched.
+func NewRAGQueryForProvider(ctx context.Context, username string, resolved providerService.ResolvedConfig) (*RAGQuery, error) {
+	cfg := config.GetConfig()
+	userDir := filepath.Join(cfg.RuntimeConfig.UploadDir, username)
+	filenames, err := listKnowledgeFiles(userDir)
+	if err != nil {
+		if errors.Is(err, ErrNoKnowledgeFiles) {
+			return nil, fmt.Errorf("%w for user %s", err, username)
+		}
+		return nil, fmt.Errorf("read knowledge files for user %s: %w", username, err)
 	}
 	embedder, err := newConfiguredEmbedderWithKey(ctx, resolved.BaseURL, resolved.Model, resolved.APIKey)
 	if err != nil {
@@ -574,9 +582,29 @@ func NewRAGQuery(ctx context.Context, username string) (*RAGQuery, error) {
 		retrievers = append(retrievers, rtr)
 	}
 	if len(retrievers) == 0 {
-		return nil, fmt.Errorf("RAG index requires rebuild for embedding provider %q", resolved.Model)
+		return nil, fmt.Errorf("%w for embedding provider %q", ErrIndexRebuildRequired, resolved.Model)
 	}
 	return &RAGQuery{embedding: embedder, retrievers: retrievers, topK: topK}, nil
+}
+
+func listKnowledgeFiles(userDir string) ([]string, error) {
+	files, err := os.ReadDir(userDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrNoKnowledgeFiles
+		}
+		return nil, err
+	}
+	filenames := make([]string, 0, len(files))
+	for _, file := range files {
+		if !file.IsDir() && !strings.HasPrefix(file.Name(), ".") {
+			filenames = append(filenames, file.Name())
+		}
+	}
+	if len(filenames) == 0 {
+		return nil, ErrNoKnowledgeFiles
+	}
+	return filenames, nil
 }
 
 func (r *RAGQuery) RetrieveDocuments(ctx context.Context, query string) ([]*schema.Document, error) {
