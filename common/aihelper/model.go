@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -234,29 +233,16 @@ func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.M
 	// 1. 创建 RAG 查询器
 	ragQuery, err := rag.NewRAGQueryForProvider(ctx, o.username, o.embedding)
 	if err != nil {
-		if errors.Is(err, rag.ErrNoKnowledgeFiles) {
+		if shouldFallbackToPlainChat(err) {
 			return o.llm.Generate(ctx, messages)
 		}
-		if errors.Is(err, rag.ErrIndexRebuildRequired) {
-			return nil, err
-		}
-		log.Printf("Failed to create RAG query (user may not have uploaded file): %v", err)
-		resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, nil))
-		if err != nil {
-			return nil, fmt.Errorf("ali rag generate failed: %w", err)
-		}
-		return resp, nil
+		return nil, fmt.Errorf("prepare RAG query: %w", err)
 	}
 
 	// 2. 检索相关文档
 	docs, err := ragQuery.RetrieveDocuments(ctx, query)
 	if err != nil {
-		log.Printf("Failed to retrieve documents: %v", err)
-		resp, err := o.llm.Generate(ctx, withRAGPrompt(messages, query, nil))
-		if err != nil {
-			return nil, fmt.Errorf("ali rag generate failed: %w", err)
-		}
-		return resp, nil
+		return nil, fmt.Errorf("retrieve RAG documents: %w", err)
 	}
 
 	// 3. 构建包含检索结果的提示词并调用 LLM。
@@ -276,31 +262,27 @@ func (o *AliRAGModel) StreamResponse(ctx context.Context, messages []*schema.Mes
 	// 1. 创建 RAG 查询器
 	ragQuery, err := rag.NewRAGQueryForProvider(ctx, o.username, o.embedding)
 	if err != nil {
-		if errors.Is(err, rag.ErrNoKnowledgeFiles) {
+		if shouldFallbackToPlainChat(err) {
 			return o.streamMessages(ctx, messages, cb)
 		}
-		if errors.Is(err, rag.ErrIndexRebuildRequired) {
-			return "", err
-		}
-		log.Printf("Failed to create RAG query (user may not have uploaded file): %v", err)
-		return o.streamWithRAGPrompt(ctx, messages, query, nil, cb)
+		return "", fmt.Errorf("prepare RAG query: %w", err)
 	}
 
 	// 2. 检索相关文档
 	docs, err := ragQuery.RetrieveDocuments(ctx, query)
 	if err != nil {
-		log.Printf("Failed to retrieve documents: %v", err)
-		return o.streamWithRAGPrompt(ctx, messages, query, nil, cb)
+		return "", fmt.Errorf("retrieve RAG documents: %w", err)
 	}
 
 	return o.streamWithRAGPrompt(ctx, messages, query, docs, cb)
 }
 
 func withRAGPrompt(messages []*schema.Message, query string, docs []*schema.Document) []*schema.Message {
-	ragMessages := make([]*schema.Message, len(messages))
-	copy(ragMessages, messages)
-	ragMessages[len(ragMessages)-1] = &schema.Message{Role: schema.User, Content: rag.BuildRAGPrompt(query, docs)}
-	return ragMessages
+	return rag.BuildRAGMessages(messages, query, docs)
+}
+
+func shouldFallbackToPlainChat(err error) bool {
+	return errors.Is(err, rag.ErrNoKnowledgeFiles)
 }
 
 func (o *AliRAGModel) streamWithRAGPrompt(ctx context.Context, messages []*schema.Message, query string, docs []*schema.Document, cb StreamCallback) (string, error) {
@@ -589,10 +571,7 @@ func (m *MCPModel) withRAGContext(ctx context.Context, messages []*schema.Messag
 	if err != nil {
 		return nil, fmt.Errorf("retrieve knowledge context: %w", err)
 	}
-	withContext := make([]*schema.Message, len(messages))
-	copy(withContext, messages)
-	withContext[len(withContext)-1] = &schema.Message{Role: schema.User, Content: rag.BuildRAGPrompt(query, docs)}
-	return withContext, nil
+	return withRAGPrompt(messages, query, docs), nil
 }
 
 func (m *MCPModel) maxSteps() int {

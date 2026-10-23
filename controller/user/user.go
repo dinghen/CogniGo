@@ -12,8 +12,8 @@ import (
 type (
 	//这里的Username只能是账号登录，和我做的另一个项目有区别（邮箱账号均可)
 	LoginRequest struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required,min=6"`
 	}
 	// omitempty当字段为空的时候，不返回这个东西
 	LoginResponse struct {
@@ -23,9 +23,9 @@ type (
 	//验证码由后端生成，存放到redis中，固然需要先发送一次请求CaptchaRequest,然后用返回的验证码
 	//邮箱以及密码进行注册，后续再将账号进行返回
 	RegisterRequest struct {
-		Email    string `json:"email" binding:"required"`
-		Captcha  string `json:"captcha"`
-		Password string `json:"password"`
+		Email    string `json:"email" binding:"required,email"`
+		Captcha  string `json:"captcha" binding:"required,len=6"`
+		Password string `json:"password" binding:"required,min=6"`
 	}
 	//注册成功之后，直接让其进行登录状态
 	RegisterResponse struct {
@@ -34,7 +34,7 @@ type (
 	}
 
 	CaptchaRequest struct {
-		Email string `json:"email" binding:"required"`
+		Email string `json:"email" binding:"required,email"`
 	}
 
 	CaptchaResponse struct {

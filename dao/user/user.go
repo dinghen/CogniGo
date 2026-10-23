@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/dinghen/CogniGo/common/mysql"
 	"github.com/dinghen/CogniGo/model"
 	"github.com/dinghen/CogniGo/utils"
@@ -17,16 +18,20 @@ const (
 
 var ctx = context.Background()
 
-// IsExistUser accepts either the generated username or the registration email.
-func IsExistUser(identifier string) (bool, *model.User) {
-
-	user, err := mysql.GetUserByIdentifier(identifier)
-
-	if err == gorm.ErrRecordNotFound || user == nil {
-		return false, nil
+// FindByIdentifier accepts either the generated username or registration email.
+// A nil user means no matching record; database errors remain distinguishable.
+func FindByIdentifier(identifier string) (*model.User, error) {
+	if mysql.DB == nil {
+		return nil, errors.New("database is not initialized")
 	}
-
-	return true, user
+	user, err := mysql.GetUserByIdentifier(identifier)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find user by identifier: %w", err)
+	}
+	return user, nil
 }
 
 // FindByUsername returns the authenticated user's record for ownership checks.
@@ -37,15 +42,18 @@ func FindByUsername(username string) (*model.User, error) {
 	return mysql.GetUserByUsername(username)
 }
 
-func Register(username, email, password string) (*model.User, bool) {
-	if user, err := mysql.InsertUser(&model.User{
+func Register(username, email, password string) (*model.User, error) {
+	if mysql.DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
+	user, err := mysql.InsertUser(&model.User{
 		Email:    email,
 		Name:     username,
 		Username: username,
 		Password: utils.MD5(password),
-	}); err != nil {
-		return nil, false
-	} else {
-		return user, true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("insert user: %w", err)
 	}
+	return user, nil
 }

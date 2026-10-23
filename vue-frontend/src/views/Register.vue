@@ -150,7 +150,7 @@ export default {
         }
       } catch (error) {
         console.error('Send code error:', error)
-        ElMessage.error('验证码发送失败，请重试')
+        ElMessage.error(error.response?.data?.status_msg || '验证码发送失败，请检查服务状态后重试')
       } finally {
         codeLoading.value = false
       }
@@ -179,7 +179,7 @@ export default {
         }
       } catch (error) {
         console.error('Register error:', error)
-        ElMessage.error('注册失败，请重试')
+        ElMessage.error(error.response?.data?.status_msg || '注册失败，请检查服务状态后重试')
       } finally {
         loading.value = false
       }

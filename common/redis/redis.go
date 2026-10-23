@@ -120,28 +120,33 @@ func CheckCaptchaForEmail(email, userInput string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	key := GenerateCaptcha(email)
-
-	storedCaptcha, err := rdb.Get(ctx, key).Result()
+	const script = `if string.lower(redis.call("GET", KEYS[1]) or "") == string.lower(ARGV[1]) then return redis.call("DEL", KEYS[1]) else return 0 end`
+	result, err := redisCli.NewScript(script).Run(ctx, rdb, []string{GenerateCaptcha(email)}, userInput).Int64()
 	if err != nil {
-		if err == redisCli.Nil {
-
-			return false, nil
-		}
-
 		return false, err
 	}
+	return result == 1, nil
+}
 
-	if strings.EqualFold(storedCaptcha, userInput) {
-
-		// 验证成功后删除 key
-		if err := rdb.Del(ctx, key).Err(); err != nil {
-			return false, err
-		}
-		return true, nil
+// DeleteCaptchaForEmail removes a code only when it still matches the value
+// supplied by the caller, preventing a failed send from deleting a newer code.
+func DeleteCaptchaForEmail(email, expectedCaptcha string) error {
+	rdb, err := client()
+	if err != nil {
+		return err
 	}
+	const script = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+	return redisCli.NewScript(script).Run(ctx, rdb, []string{GenerateCaptcha(email)}, expectedCaptcha).Err()
+}
 
-	return false, nil
+// RestoreCaptchaForEmail restores a consumed code after a failed durable
+// registration write, without overwriting a newer code requested by the user.
+func RestoreCaptchaForEmail(email, captcha string) error {
+	rdb, err := client()
+	if err != nil {
+		return err
+	}
+	return rdb.SetNX(ctx, GenerateCaptcha(email), captcha, 2*time.Minute).Err()
 }
 
 // InitRedisIndex 初始化 Redis 索引，支持按文件名区分

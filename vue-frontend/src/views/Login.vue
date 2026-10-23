@@ -94,7 +94,7 @@ export default {
         }
       } catch (error) {
         console.error('Login error:', error)
-        ElMessage.error('登录失败，请重试')
+        ElMessage.error(error.response?.data?.status_msg || '登录失败，请检查服务状态后重试')
       } finally {
         loading.value = false
       }

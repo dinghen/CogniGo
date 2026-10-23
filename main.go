@@ -67,7 +67,10 @@ func main() {
 	//初始化redis
 	redis.Init()
 	log.Println("redis init success  ")
-	rabbitmq.InitRabbitMQ()
+	if err := rabbitmq.InitRabbitMQ(); err != nil {
+		log.Printf("rabbitmq init failed: %v", err)
+		return
+	}
 	log.Println("rabbitmq init success  ")
 
 	err := StartServer(host, port) // 启动 HTTP 服务

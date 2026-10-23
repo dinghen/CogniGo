@@ -142,33 +142,33 @@ pid_value() {
 }
 
 process_command() {
-  pid=$1
-  ps -p "$pid" -o command= 2>/dev/null || true
+  command_pid=$1
+  ps -p "$command_pid" -o command= 2>/dev/null || true
 }
 
 process_group_id() {
-  pid=$1
-  ps -p "$pid" -o pgid= 2>/dev/null | awk 'NF {print $1; exit}'
+  group_pid=$1
+  ps -p "$group_pid" -o pgid= 2>/dev/null | awk 'NF {print $1; exit}'
 }
 
 process_group_members() {
-  group=$1
-  ps -eo pid=,pgid= 2>/dev/null | awk -v group="$group" '$2 == group {print $1}'
+  members_group=$1
+  ps -eo pid=,pgid= 2>/dev/null | awk -v group="$members_group" '$2 == group {print $1}'
 }
 
 process_command_matches() {
-  command=$1
-  expected=$2
-  case "$expected" in
+  matched_command=$1
+  matched_expected=$2
+  case "$matched_expected" in
     "npm run serve")
-      case "$command" in
+      case "$matched_command" in
         *"npm run serve"*|*"vue-cli-service"*"serve"*) return 0 ;;
         *) return 1 ;;
       esac
       ;;
     *)
-      case "$command" in
-        *"$expected"*) return 0 ;;
+      case "$matched_command" in
+        *"$matched_expected"*) return 0 ;;
         *) return 1 ;;
       esac
       ;;
@@ -176,86 +176,111 @@ process_command_matches() {
 }
 
 process_cwd() {
-  pid=$1
-  if [ -e "/proc/$pid/cwd" ]; then
-    readlink "/proc/$pid/cwd" 2>/dev/null || true
+  cwd_pid=$1
+  if [ -e "/proc/$cwd_pid/cwd" ]; then
+    readlink "/proc/$cwd_pid/cwd" 2>/dev/null || true
   elif command -v lsof >/dev/null 2>&1; then
-    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+    lsof -a -p "$cwd_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
   fi
 }
 
+process_state() {
+  state_pid=$1
+  ps -p "$state_pid" -o state= 2>/dev/null | awk 'NF {print $1; exit}'
+}
+
+# kill -0 also succeeds for zombies, so require a live process state.
+process_running() {
+  running_pid=$1
+  kill -0 "$running_pid" 2>/dev/null || return 1
+  running_state=$(process_state "$running_pid")
+  case "$running_state" in
+    ''|Z*|z*|X*|x*) return 1 ;;
+  esac
+  return 0
+}
+
+process_group_has_live_members() {
+  live_group=$1
+  for live_member in $(process_group_members "$live_group"); do
+    process_running "$live_member" && return 0
+  done
+  return 1
+}
+
 process_identity_owned() {
-  pid=$1
-  expected=$2
-  kill -0 "$pid" 2>/dev/null || return 1
-  command=$(process_command "$pid")
-  cwd=$(process_cwd "$pid")
-  process_command_matches "$command" "$expected" || return 1
-  case "$cwd" in
+  identity_pid=$1
+  identity_expected=$2
+  process_running "$identity_pid" || return 1
+  identity_command=$(process_command "$identity_pid")
+  identity_cwd=$(process_cwd "$identity_pid")
+  process_command_matches "$identity_command" "$identity_expected" || return 1
+  case "$identity_cwd" in
     "$ROOT_DIR"|"$ROOT_DIR"/*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 pgid_value() {
-  file=$1
-  [ -s "$file" ] || return 1
-  pgid=$(sed -n '1p' "$file")
-  case "$pgid" in
+  pgid_file=$1
+  [ -s "$pgid_file" ] || return 1
+  pgid_content=$(sed -n '1p' "$pgid_file")
+  case "$pgid_content" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  printf '%s\n' "$pgid"
+  printf '%s\n' "$pgid_content"
 }
 
 record_process_group() {
-  pid=$1
-  file=$2
-  pgid=$(process_group_id "$pid" || true)
-  case "$pgid" in
-    ''|0|"$$") rm -f "$file" ;;
-    *) printf '%s\n' "$pgid" >"$file" ;;
+  record_pid=$1
+  record_file=$2
+  record_pgid=$(process_group_id "$record_pid" || true)
+  case "$record_pgid" in
+    ''|0|"$$") rm -f "$record_file" ;;
+    *) printf '%s\n' "$record_pgid" >"$record_file" ;;
   esac
 }
 
 process_group_owned() {
-  pid=$1
-  expected=$2
-  group_file=${3:-}
-  group=$(pgid_value "$group_file" 2>/dev/null || true)
-  [ -n "$group" ] || group=$(process_group_id "$pid" 2>/dev/null || true)
-  [ -n "$group" ] || return 1
-  members=$(process_group_members "$group")
-  [ -n "$members" ] || return 1
-  for member in $members; do
-    process_identity_owned "$member" "$expected" && return 0
+  owner_pid=$1
+  owner_expected=$2
+  owner_group_file=${3:-}
+  owner_group=$(pgid_value "$owner_group_file" 2>/dev/null || true)
+  [ -n "$owner_group" ] || owner_group=$(process_group_id "$owner_pid" 2>/dev/null || true)
+  [ -n "$owner_group" ] || return 1
+  owner_members=$(process_group_members "$owner_group")
+  [ -n "$owner_members" ] || return 1
+  for owner_member in $owner_members; do
+    process_identity_owned "$owner_member" "$owner_expected" && return 0
   done
   return 1
 }
 
 process_owned() {
-  pid=$1
-  expected=$2
-  group_file=${3:-}
-  process_identity_owned "$pid" "$expected" || process_group_owned "$pid" "$expected" "$group_file"
+  owned_pid=$1
+  owned_expected=$2
+  owned_group_file=${3:-}
+  process_running "$owned_pid" || return 1
+  process_identity_owned "$owned_pid" "$owned_expected" || process_group_owned "$owned_pid" "$owned_expected" "$owned_group_file"
 }
 
 recorded_running() {
-  file=$1
-  expected=$2
-  group_file=${3:-}
-  pid=$(pid_value "$file" 2>/dev/null || true)
-  [ -n "$pid" ] && process_owned "$pid" "$expected" "$group_file"
+  recorded_file=$1
+  recorded_expected=$2
+  recorded_group_file=${3:-}
+  recorded_pid=$(pid_value "$recorded_file" 2>/dev/null || true)
+  [ -n "$recorded_pid" ] && process_owned "$recorded_pid" "$recorded_expected" "$recorded_group_file"
 }
 
 clear_stale_pid() {
-  file=$1
-  expected=$2
-  group_file=${3:-}
-  pid=$(pid_value "$file" 2>/dev/null || true)
-  [ -z "$pid" ] && return 0
-  recorded_running "$file" "$expected" "$group_file" && return 0
-  rm -f "$file"
-  rm -f "$group_file"
+  stale_file=$1
+  stale_expected=$2
+  stale_group_file=${3:-}
+  stale_pid=$(pid_value "$stale_file" 2>/dev/null || true)
+  [ -z "$stale_pid" ] && return 0
+  recorded_running "$stale_file" "$stale_expected" "$stale_group_file" && return 0
+  rm -f "$stale_file"
+  rm -f "$stale_group_file"
 }
 
 listener_pid() {
@@ -305,11 +330,11 @@ ensure_app_ports_free() {
 }
 
 build_if_needed() {
-  if [ ! -x "$ROOT_DIR/bin/cognigo" ]; then
+  if binary_needs_build "$ROOT_DIR/bin/cognigo" "$ROOT_DIR"; then
     say "building API binary"
     (cd "$ROOT_DIR" && make build)
   fi
-  if [ ! -x "$ROOT_DIR/common/mcp/bin/cognigo-mcp" ]; then
+  if binary_needs_build "$ROOT_DIR/common/mcp/bin/cognigo-mcp" "$ROOT_DIR/common/mcp"; then
     say "building MCP binary"
     (cd "$ROOT_DIR" && make build-mcp)
   fi
@@ -317,6 +342,19 @@ build_if_needed() {
     say "installing frontend dependencies"
     (cd "$ROOT_DIR" && make frontend-install)
   fi
+}
+
+binary_needs_build() {
+  build_target=$1
+  build_source_dir=$2
+  [ ! -x "$build_target" ] && return 0
+  for build_metadata in "$ROOT_DIR/Makefile" "$build_source_dir/go.mod" "$build_source_dir/go.sum"; do
+    [ -f "$build_metadata" ] || continue
+    if find "$build_metadata" -newer "$build_target" -print -quit 2>/dev/null | grep -q .; then
+      return 0
+    fi
+  done
+  find "$build_source_dir" -type f -name '*.go' -newer "$build_target" -print -quit 2>/dev/null | grep -q .
 }
 
 compose_service_ready() {
@@ -425,16 +463,17 @@ start_process() {
       exec env COGNIGO_MCP_URL="http://127.0.0.1:$MCP_PORT/mcp" "$@"
     ) >"$log_file" 2>&1 &
   fi
-  pid=$!
-  printf '%s\n' "$pid" >"$pid_file"
-  record_process_group "$pid" "$group_file"
+  started_pid=$!
+  printf '%s\n' "$started_pid" >"$pid_file"
+  record_process_group "$started_pid" "$group_file"
   case "$name" in
     api) STARTED_API=1 ;;
     mcp) STARTED_MCP=1 ;;
   esac
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    process_owned "$pid" "$expected" "$group_file" && return 0
+    process_owned "$started_pid" "$expected" "$group_file" && return 0
+    process_running "$started_pid" || die "$name exited during startup; inspect $log_file"
     sleep 1
   done
   die "$name exited during startup; inspect $log_file"
@@ -453,13 +492,14 @@ start_frontend() {
   else
     (export COGNIGO_API_URL="http://127.0.0.1:$API_PORT"; cd "$ROOT_DIR/vue-frontend" && npm run serve -- --port "$FRONTEND_PORT") >"$FRONTEND_LOG" 2>&1 &
   fi
-  pid=$!
-  printf '%s\n' "$pid" >"$FRONTEND_PID_FILE"
-  record_process_group "$pid" "$FRONTEND_PGID_FILE"
+  started_pid=$!
+  printf '%s\n' "$started_pid" >"$FRONTEND_PID_FILE"
+  record_process_group "$started_pid" "$FRONTEND_PGID_FILE"
   STARTED_FRONTEND=1
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    process_owned "$pid" "npm run serve" "$FRONTEND_PGID_FILE" && return 0
+    process_owned "$started_pid" "npm run serve" "$FRONTEND_PGID_FILE" && return 0
+    process_running "$started_pid" || die "frontend exited during startup; inspect $FRONTEND_LOG"
     sleep 1
   done
   die "frontend exited during startup; inspect $FRONTEND_LOG"
@@ -517,15 +557,15 @@ stop_process() {
   deadline=$(( $(date +%s) + 10 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if [ -n "$group" ]; then
-      process_group_members "$group" | grep -q . || break
-    elif ! kill -0 "$pid" 2>/dev/null; then
+      process_group_has_live_members "$group" || break
+    elif ! process_running "$pid"; then
       break
     fi
     sleep 1
   done
-  if [ -n "$group" ] && process_group_members "$group" | grep -q .; then
+  if [ -n "$group" ] && process_group_has_live_members "$group"; then
     warn "$name did not stop after 10s; leaving it running"
-  elif [ -z "$group" ] && kill -0 "$pid" 2>/dev/null; then
+  elif [ -z "$group" ] && process_running "$pid"; then
     warn "$name did not stop after 10s; leaving it running"
   else
     rm -f "$file"
