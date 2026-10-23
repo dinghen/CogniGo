@@ -349,8 +349,15 @@ wait_for_compose() {
   deadline=$(( $(date +%s) + WAIT_SECONDS ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     ready=1
-    for service in mysql redis rabbitmq mailpit; do
+    for entry in \
+      "mysql:${COGNIGO_MYSQL_PORT:-3306}" \
+      "redis:${COGNIGO_REDIS_PORT:-6379}" \
+      "rabbitmq:${COGNIGO_RABBITMQ_PORT:-5672}" \
+      "mailpit:${COGNIGO_SMTP_PORT:-1025}"; do
+      service=${entry%%:*}
+      port=${entry#*:}
       compose_service_ready "$service" || ready=0
+      port_in_use "$port" || ready=0
     done
     [ "$ready" -eq 1 ] && return 0
     sleep 2

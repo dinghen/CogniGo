@@ -17,10 +17,10 @@ const (
 
 var ctx = context.Background()
 
-// 这边只能通过账号进行登录
-func IsExistUser(username string) (bool, *model.User) {
+// IsExistUser accepts either the generated username or the registration email.
+func IsExistUser(identifier string) (bool, *model.User) {
 
-	user, err := mysql.GetUserByUsername(username)
+	user, err := mysql.GetUserByIdentifier(identifier)
 
 	if err == gorm.ErrRecordNotFound || user == nil {
 		return false, nil

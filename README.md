@@ -82,15 +82,15 @@ cp .env.example .env
 
 也可以使用等价的 Makefile 入口：`make demo-start`、`make demo-status`、`make demo-logs` 和 `make demo-stop`。如果提示端口已被占用，脚本不会停止未知进程；请先查看 `./scripts/demo.sh status`，再在 `.env` 中调整 `COGNIGO_PORT`、`COGNIGO_FRONTEND_PORT`、`COGNIGO_MCP_PORT` 或 Compose 对应的 `COGNIGO_*_PORT`。
 
-脚本会记录 API、MCP 和前端的进程组。若上次启动异常导致 PID 文件丢失，`stop`/`start` 会根据端口、工作目录和命令行安全恢复本项目的监听进程；其他项目占用的端口不会被停止。
+脚本会记录 API、MCP 和前端的进程组，并在启动 API 前确认 Compose 服务的宿主机端口已经可用。若上次启动异常导致 PID 文件丢失，`stop`/`start` 会根据端口、工作目录和命令行安全恢复本项目的监听进程；其他项目占用的端口不会被停止。
 
 启动成功后：
 
 1. 打开前端，进入注册页，填写邮箱和密码。
-2. 打开 Mailpit，读取验证码并完成注册。注册邮件和后续账号邮件都会出现在本地 Mailpit，不需要真实邮箱。
+2. 本地演示的验证码不会发送到真实邮箱：打开 Mailpit（默认 `http://127.0.0.1:8026`），按收件人读取验证码并完成注册。注册邮件和后续账号邮件都会出现在本地 Mailpit。
 3. 登录后进入“配置中心”，添加聊天模型或 Embedding 连接；连接测试成功后再上传知识文件。
 4. 在配置中心添加 MCP 服务并执行“测试并发现工具”。HTTP 服务填写 `url` 和可选 headers；stdio 需要部署端显式设置 `COGNIGO_MCP_ALLOW_STDIO=true`，并将命令加入 `COGNIGO_MCP_STDIO_COMMANDS` 白名单。
-5. 回到聊天工作区创建新会话，按需选择 MCP 服务和工具。普通会话不创建 MCP Client；选择 MCP 后才会把允许的工具交给模型。
+5. 回到聊天工作区创建新会话，按需选择 MCP 服务和工具。普通会话不创建 MCP Client；选择 MCP 后才会把允许的工具交给模型。登录时可使用注册后邮件中的数字账号或注册邮箱。
 
 MCP 地址是协议端点，不是网页页面；浏览器直接访问 `/mcp` 得到 `400` 或要求会话头属于正常行为。
 

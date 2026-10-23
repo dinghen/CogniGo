@@ -81,3 +81,11 @@ func GetUserByUsername(username string) (*model.User, error) {
 	err := DB.Where("username = ?", username).First(user).Error
 	return user, err
 }
+
+// GetUserByIdentifier supports the public login contract: users may enter the
+// generated username returned after registration or the email used to register.
+func GetUserByIdentifier(identifier string) (*model.User, error) {
+	user := new(model.User)
+	err := DB.Where("username = ? OR email = ?", identifier, identifier).First(user).Error
+	return user, err
+}

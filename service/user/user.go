@@ -10,11 +10,11 @@ import (
 	"github.com/dinghen/CogniGo/utils/myjwt"
 )
 
-func Login(username, password string) (string, code.Code) {
+func Login(identifier, password string) (string, code.Code) {
 	var userInformation *model.User
 	var ok bool
 	//1:判断用户是否存在
-	if ok, userInformation = user.IsExistUser(username); !ok {
+	if ok, userInformation = user.IsExistUser(identifier); !ok {
 
 		return "", code.CodeUserNotExist
 	}
