@@ -12,6 +12,9 @@ DOCKER_BIN=${COGNIGO_DOCKER_BIN:-}
 API_PID_FILE="$RUNTIME_DIR/api.pid"
 MCP_PID_FILE="$RUNTIME_DIR/mcp.pid"
 FRONTEND_PID_FILE="$RUNTIME_DIR/frontend.pid"
+API_PGID_FILE="$RUNTIME_DIR/api.pgid"
+MCP_PGID_FILE="$RUNTIME_DIR/mcp.pgid"
+FRONTEND_PGID_FILE="$RUNTIME_DIR/frontend.pgid"
 API_LOG="$RUNTIME_DIR/api.log"
 MCP_LOG="$RUNTIME_DIR/mcp.log"
 FRONTEND_LOG="$RUNTIME_DIR/frontend.log"
@@ -143,6 +146,35 @@ process_command() {
   ps -p "$pid" -o command= 2>/dev/null || true
 }
 
+process_group_id() {
+  pid=$1
+  ps -p "$pid" -o pgid= 2>/dev/null | awk 'NF {print $1; exit}'
+}
+
+process_group_members() {
+  group=$1
+  ps -eo pid=,pgid= 2>/dev/null | awk -v group="$group" '$2 == group {print $1}'
+}
+
+process_command_matches() {
+  command=$1
+  expected=$2
+  case "$expected" in
+    "npm run serve")
+      case "$command" in
+        *"npm run serve"*|*"vue-cli-service"*"serve"*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      case "$command" in
+        *"$expected"*) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+}
+
 process_cwd() {
   pid=$1
   if [ -e "/proc/$pid/cwd" ]; then
@@ -152,36 +184,107 @@ process_cwd() {
   fi
 }
 
-process_owned() {
+process_identity_owned() {
   pid=$1
   expected=$2
   kill -0 "$pid" 2>/dev/null || return 1
   command=$(process_command "$pid")
   cwd=$(process_cwd "$pid")
-  case "$command" in
-    *"$expected"*) ;;
-    *) return 1 ;;
-  esac
+  process_command_matches "$command" "$expected" || return 1
   case "$cwd" in
     "$ROOT_DIR"|"$ROOT_DIR"/*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
+pgid_value() {
+  file=$1
+  [ -s "$file" ] || return 1
+  pgid=$(sed -n '1p' "$file")
+  case "$pgid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pgid"
+}
+
+record_process_group() {
+  pid=$1
+  file=$2
+  pgid=$(process_group_id "$pid" || true)
+  case "$pgid" in
+    ''|0|"$$") rm -f "$file" ;;
+    *) printf '%s\n' "$pgid" >"$file" ;;
+  esac
+}
+
+process_group_owned() {
+  pid=$1
+  expected=$2
+  group_file=${3:-}
+  group=$(pgid_value "$group_file" 2>/dev/null || true)
+  [ -n "$group" ] || group=$(process_group_id "$pid" 2>/dev/null || true)
+  [ -n "$group" ] || return 1
+  members=$(process_group_members "$group")
+  [ -n "$members" ] || return 1
+  for member in $members; do
+    process_identity_owned "$member" "$expected" && return 0
+  done
+  return 1
+}
+
+process_owned() {
+  pid=$1
+  expected=$2
+  group_file=${3:-}
+  process_identity_owned "$pid" "$expected" || process_group_owned "$pid" "$expected" "$group_file"
+}
+
 recorded_running() {
   file=$1
   expected=$2
+  group_file=${3:-}
   pid=$(pid_value "$file" 2>/dev/null || true)
-  [ -n "$pid" ] && process_owned "$pid" "$expected"
+  [ -n "$pid" ] && process_owned "$pid" "$expected" "$group_file"
 }
 
 clear_stale_pid() {
   file=$1
   expected=$2
+  group_file=${3:-}
   pid=$(pid_value "$file" 2>/dev/null || true)
   [ -z "$pid" ] && return 0
-  recorded_running "$file" "$expected" && return 0
+  recorded_running "$file" "$expected" "$group_file" && return 0
   rm -f "$file"
+  rm -f "$group_file"
+}
+
+listener_pid() {
+  port=$1
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1
+    return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH 2>/dev/null \
+      | awk -v port=":$port" '$4 ~ (port "$" ) {print}' \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | head -n 1
+  fi
+}
+
+recover_listener() {
+  name=$1
+  port=$2
+  file=$3
+  group_file=$4
+  expected=$5
+  listener=$(listener_pid "$port" || true)
+  [ -n "$listener" ] || return 1
+  process_owned "$listener" "$expected" || return 1
+  printf '%s\n' "$listener" >"$file"
+  record_process_group "$listener" "$group_file"
+  say "recovered $name (pid $listener)"
+  return 0
 }
 
 ensure_app_ports_free() {
@@ -190,11 +293,13 @@ ensure_app_ports_free() {
     port=${entry#*:}
     if port_in_use "$port"; then
       case "$service" in
-        api) expected="bin/cognigo"; file=$API_PID_FILE ;;
-        mcp) expected="common/mcp/bin/cognigo-mcp"; file=$MCP_PID_FILE ;;
-        frontend) expected="npm run serve"; file=$FRONTEND_PID_FILE ;;
+        api) expected="bin/cognigo"; file=$API_PID_FILE; group_file=$API_PGID_FILE ;;
+        mcp) expected="common/mcp/bin/cognigo-mcp"; file=$MCP_PID_FILE; group_file=$MCP_PGID_FILE ;;
+        frontend) expected="npm run serve"; file=$FRONTEND_PID_FILE; group_file=$FRONTEND_PGID_FILE ;;
       esac
-      recorded_running "$file" "$expected" || die "port $port for $service is already in use; set its COGNIGO_*_PORT/COGNIGO_FRONTEND_PORT or stop the owning process"
+      recorded_running "$file" "$expected" "$group_file" || \
+        recover_listener "$service" "$port" "$file" "$group_file" "$expected" || \
+        die "port $port for $service is already in use; set its COGNIGO_*_PORT/COGNIGO_FRONTEND_PORT or stop the owning process"
     fi
   done
 }
@@ -289,9 +394,14 @@ start_process() {
   log_file=$3
   expected=$4
   shift 4
+  case "$name" in
+    api) group_file=$API_PGID_FILE ;;
+    mcp) group_file=$MCP_PGID_FILE ;;
+    *) group_file="" ;;
+  esac
 
-  clear_stale_pid "$pid_file" "$expected"
-  if recorded_running "$pid_file" "$expected"; then
+  clear_stale_pid "$pid_file" "$expected" "$group_file"
+  if recorded_running "$pid_file" "$expected" "$group_file"; then
     say "$name already running (pid $(pid_value "$pid_file"))"
     return 0
   fi
@@ -310,17 +420,22 @@ start_process() {
   fi
   pid=$!
   printf '%s\n' "$pid" >"$pid_file"
+  record_process_group "$pid" "$group_file"
   case "$name" in
     api) STARTED_API=1 ;;
     mcp) STARTED_MCP=1 ;;
   esac
-  sleep 1
-  process_owned "$pid" "$expected" || die "$name exited during startup; inspect $log_file"
+  deadline=$(( $(date +%s) + 10 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    process_owned "$pid" "$expected" "$group_file" && return 0
+    sleep 1
+  done
+  die "$name exited during startup; inspect $log_file"
 }
 
 start_frontend() {
-  clear_stale_pid "$FRONTEND_PID_FILE" "npm run serve"
-  if recorded_running "$FRONTEND_PID_FILE" "npm run serve"; then
+  clear_stale_pid "$FRONTEND_PID_FILE" "npm run serve" "$FRONTEND_PGID_FILE"
+  if recorded_running "$FRONTEND_PID_FILE" "npm run serve" "$FRONTEND_PGID_FILE"; then
     say "frontend already running (pid $(pid_value "$FRONTEND_PID_FILE"))"
     return 0
   fi
@@ -333,9 +448,14 @@ start_frontend() {
   fi
   pid=$!
   printf '%s\n' "$pid" >"$FRONTEND_PID_FILE"
+  record_process_group "$pid" "$FRONTEND_PGID_FILE"
   STARTED_FRONTEND=1
-  sleep 1
-  process_owned "$pid" "npm run serve" || die "frontend exited during startup; inspect $FRONTEND_LOG"
+  deadline=$(( $(date +%s) + 10 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    process_owned "$pid" "npm run serve" "$FRONTEND_PGID_FILE" && return 0
+    sleep 1
+  done
+  die "frontend exited during startup; inspect $FRONTEND_LOG"
 }
 
 start() {
@@ -364,28 +484,45 @@ stop_process() {
   name=$1
   file=$2
   expected=$3
+  group_file=$4
+  port=${5:-}
   pid=$(pid_value "$file" 2>/dev/null || true)
+  if [ -z "$pid" ] && [ -n "$port" ]; then
+    pid=$(listener_pid "$port" || true)
+  fi
   if [ -z "$pid" ]; then
     say "$name is not recorded"
     return 0
   fi
-  if ! process_owned "$pid" "$expected"; then
+  if ! process_owned "$pid" "$expected" "$group_file"; then
     warn "not stopping pid $pid for $name because ownership could not be verified"
     rm -f "$file"
+    rm -f "$group_file"
     return 0
   fi
   say "stopping $name (pid $pid)"
-  if command -v setsid >/dev/null 2>&1; then
-    kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  group=$(pgid_value "$group_file" 2>/dev/null || process_group_id "$pid" 2>/dev/null || true)
+  if [ -n "$group" ] && [ "$group" != "$$" ]; then
+    kill -TERM -"$group" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   else
     kill -TERM "$pid" 2>/dev/null || true
   fi
   deadline=$(( $(date +%s) + 10 ))
-  while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
-  if kill -0 "$pid" 2>/dev/null; then
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ -n "$group" ]; then
+      process_group_members "$group" | grep -q . || break
+    elif ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -n "$group" ] && process_group_members "$group" | grep -q .; then
+    warn "$name did not stop after 10s; leaving it running"
+  elif [ -z "$group" ] && kill -0 "$pid" 2>/dev/null; then
     warn "$name did not stop after 10s; leaving it running"
   else
     rm -f "$file"
+    rm -f "$group_file"
   fi
 }
 
@@ -393,16 +530,16 @@ cleanup_started() {
   [ "${START_IN_PROGRESS:-0}" -eq 1 ] || return 0
   START_IN_PROGRESS=0
   warn "startup did not complete; stopping processes started by this invocation"
-  [ "${STARTED_FRONTEND:-0}" -eq 0 ] || stop_process frontend "$FRONTEND_PID_FILE" "npm run serve" || true
-  [ "${STARTED_MCP:-0}" -eq 0 ] || stop_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp" || true
-  [ "${STARTED_API:-0}" -eq 0 ] || stop_process api "$API_PID_FILE" "bin/cognigo" || true
+  [ "${STARTED_FRONTEND:-0}" -eq 0 ] || stop_process frontend "$FRONTEND_PID_FILE" "npm run serve" "$FRONTEND_PGID_FILE" "$FRONTEND_PORT" || true
+  [ "${STARTED_MCP:-0}" -eq 0 ] || stop_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp" "$MCP_PGID_FILE" "$MCP_PORT" || true
+  [ "${STARTED_API:-0}" -eq 0 ] || stop_process api "$API_PID_FILE" "bin/cognigo" "$API_PGID_FILE" "$API_PORT" || true
 }
 
 stop() {
-  stop_process frontend "$FRONTEND_PID_FILE" "npm run serve"
-  stop_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp"
-  stop_process api "$API_PID_FILE" "bin/cognigo"
   load_env_optional
+  stop_process frontend "$FRONTEND_PID_FILE" "npm run serve" "$FRONTEND_PGID_FILE" "$FRONTEND_PORT"
+  stop_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp" "$MCP_PGID_FILE" "$MCP_PORT"
+  stop_process api "$API_PID_FILE" "bin/cognigo" "$API_PGID_FILE" "$API_PORT"
   if docker_available; then
     say "stopping this repository's Compose project"
     compose down
@@ -415,8 +552,13 @@ status_process() {
   name=$1
   file=$2
   expected=$3
+  group_file=$4
+  port=${5:-}
   pid=$(pid_value "$file" 2>/dev/null || true)
-  if [ -n "$pid" ] && process_owned "$pid" "$expected"; then
+  if [ -z "$pid" ] && [ -n "$port" ]; then
+    pid=$(listener_pid "$port" || true)
+  fi
+  if [ -n "$pid" ] && process_owned "$pid" "$expected" "$group_file"; then
     printf '  %-9s running (pid %s)\n' "$name" "$pid"
   else
     printf '  %-9s stopped\n' "$name"
@@ -432,9 +574,9 @@ status() {
   printf '  endpoints: api=%s frontend=%s mcp=%s mailpit=%s\n' \
     "http://127.0.0.1:$API_PORT" "http://127.0.0.1:$FRONTEND_PORT" \
     "http://127.0.0.1:$MCP_PORT/mcp" "http://127.0.0.1:$MAILPIT_WEB_PORT"
-  status_process api "$API_PID_FILE" "bin/cognigo"
-  status_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp"
-  status_process frontend "$FRONTEND_PID_FILE" "npm run serve"
+  status_process api "$API_PID_FILE" "bin/cognigo" "$API_PGID_FILE" "$API_PORT"
+  status_process mcp "$MCP_PID_FILE" "common/mcp/bin/cognigo-mcp" "$MCP_PGID_FILE" "$MCP_PORT"
+  status_process frontend "$FRONTEND_PID_FILE" "npm run serve" "$FRONTEND_PGID_FILE" "$FRONTEND_PORT"
   printf '  api HTTP:     %s\n' "$(http_code "http://127.0.0.1:$API_PORT/")"
   printf '  frontend HTTP: %s\n' "$(http_code "http://127.0.0.1:$FRONTEND_PORT/")"
   printf '  mcp HTTP:     %s (400 is expected for a browser GET)\n' "$(http_code "http://127.0.0.1:$MCP_PORT/mcp")"

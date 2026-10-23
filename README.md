@@ -82,6 +82,8 @@ cp .env.example .env
 
 也可以使用等价的 Makefile 入口：`make demo-start`、`make demo-status`、`make demo-logs` 和 `make demo-stop`。如果提示端口已被占用，脚本不会停止未知进程；请先查看 `./scripts/demo.sh status`，再在 `.env` 中调整 `COGNIGO_PORT`、`COGNIGO_FRONTEND_PORT`、`COGNIGO_MCP_PORT` 或 Compose 对应的 `COGNIGO_*_PORT`。
 
+脚本会记录 API、MCP 和前端的进程组。若上次启动异常导致 PID 文件丢失，`stop`/`start` 会根据端口、工作目录和命令行安全恢复本项目的监听进程；其他项目占用的端口不会被停止。
+
 启动成功后：
 
 1. 打开前端，进入注册页，填写邮箱和密码。
